@@ -13,6 +13,7 @@
 //      exists (the newest generation owns the session);
 //   2. the event loop stops on its abort signal, so superseded generations
 //      stop consuming events as soon as they see one.
+import { statSync } from "node:fs"
 import { effectiveFiles, MarkdownCache, openMarkdownItems, renderFileSection, type MarkdownItem, type ParsedFile } from "./markdown"
 import type { Options } from "./options"
 import { openItems, type TodoItem, type TodoStore } from "./storage"
@@ -75,6 +76,11 @@ type Shell = {
   startedAt: number
   lastActivityAt: number
   command?: string
+  /** Stdout capture file (`shell.created.info.file`): its growth is the only
+   *  progress signal a silent shell produces — no events fire for output. */
+  file?: string
+  size?: number
+  mtimeMs?: number
 }
 
 type Stalled = {
@@ -574,6 +580,7 @@ export class Supervisor {
         startedAt: num(rec(info?.time)?.["started"]) ?? Date.now(),
         lastActivityAt: Date.now(),
         command: str(info?.command),
+        file: str(info?.file),
       })
       this.shellSessions.set(shellID, owner)
       return
@@ -953,8 +960,15 @@ export class Supervisor {
     const stallMs = options.stallMinutes * 60_000
 
     const runningChildren = this.runningChildren(st)
-    const activeShells = [...st.shells.entries()]
-    const runningTools = [...st.tools.values()]
+    // Name the work that is actually running, including inside busy children.
+    const activeShells = [
+      ...[...st.shells.values()],
+      ...runningChildren.flatMap((child) => [...child.shells.values()]),
+    ]
+    const runningTools = [
+      ...[...st.tools.values()],
+      ...runningChildren.flatMap((child) => [...child.tools.values()]),
+    ]
     const openSpans = [...st.spans.values()]
     const quiet = this.quietMs(st, runningChildren)
 
@@ -976,7 +990,7 @@ export class Supervisor {
       }
       const stalled = {
         children: runningChildren.map((child) => child.sessionID),
-        shells: activeShells.map(([, shell]) => shell.command ?? "(background shell)"),
+        shells: activeShells.map((shell) => shell.command ?? "(background shell)"),
         tools: runningTools.map((tool) => this.toolLabel(tool)),
         spans: openSpans.map((span) => span.kind),
         quietMs: quiet,
@@ -1002,28 +1016,69 @@ export class Supervisor {
     await this.nudge(sessionID, "open-todos")
   }
 
-  /** Running direct children of a session (registry subset). */
+  /** Running children of a session that still look busy (registry subset). */
   private runningChildren(st: SessionState): SessionState[] {
     return [...st.children]
       .map((id) => this.registry.get(id))
-      .filter((child): child is SessionState => !!child && child.status === "running")
+      .filter((child): child is SessionState => !!child && this.childLooksBusy(child))
   }
 
   /**
-   * Milliseconds since the newest activity across the session, its running
-   * children, its tracked shells and its in-flight tool calls — the
-   * "is this really idle?" clock (§12).
+   * Is this child still doing something? Open spans/tools/shells count, as does
+   * a `running` status; a child with nothing open counts only while it showed
+   * activity inside the stall window — otherwise a subagent that finished (and
+   * whose session persists) would keep its parent from ever being nudged (§12.19).
+   */
+  private childLooksBusy(child: SessionState): boolean {
+    if (child.spans.size > 0 || child.tools.size > 0 || child.shells.size > 0) return true
+    if (child.status === "running") return true
+    if (child.terminalAt !== undefined) return false
+    return this.quietMs(child) < this.deps.options.stallMinutes * 60_000
+  }
+
+  /**
+   * A shell's stdout is a capture file (`shell.created.info.file`) and writing it
+   * emits **no events**, so real progress is measured by stat-ing it (§12.22).
+   * `shellActivity` then uses the file's own mtime, so "quiet" is the true time
+   * since the last output rather than since the last evaluation.
+   */
+  private refreshShellActivity(st: SessionState): void {
+    if (st.shells.size === 0) return
+    for (const shell of st.shells.values()) {
+      if (!shell.file) continue
+      try {
+        const stat = statSync(shell.file)
+        shell.size = stat.size
+        shell.mtimeMs = stat.mtimeMs
+      } catch {
+        // missing/unreadable capture: keep the previous reading
+      }
+    }
+  }
+
+  /** Newest activity for one shell (start, last event, capture-file write). */
+  private shellActivity(shell: Shell): number {
+    return Math.max(shell.startedAt, shell.lastActivityAt, shell.mtimeMs ?? 0)
+  }
+
+  /**
+   * Milliseconds since the newest activity across the session, the children that
+   * still look busy (transitively, including their shells and tools), its tracked
+   * shells and its in-flight tool calls — the "is this really idle?" clock (§12).
    */
   private quietMs(st: SessionState, runningChildren?: SessionState[]): number {
-    const children = runningChildren ?? this.runningChildren(st)
-    const newest = Math.max(
-      0,
-      st.lastActivityAt,
-      ...children.map((child) => child.lastActivityAt),
-      ...[...st.shells.values()].map((shell) => Math.max(shell.startedAt, shell.lastActivityAt)),
-      ...[...st.tools.values()].map((tool) => Math.max(tool.startedAt, tool.lastActivityAt)),
-    )
-    return Date.now() - newest
+    const active = runningChildren ?? this.runningChildren(st)
+    this.refreshShellActivity(st)
+    const points: number[] = [st.lastActivityAt]
+    for (const shell of st.shells.values()) points.push(this.shellActivity(shell))
+    for (const tool of st.tools.values()) points.push(Math.max(tool.startedAt, tool.lastActivityAt))
+    for (const child of active) {
+      this.refreshShellActivity(child)
+      points.push(child.lastActivityAt)
+      for (const shell of child.shells.values()) points.push(this.shellActivity(shell))
+      for (const tool of child.tools.values()) points.push(Math.max(tool.startedAt, tool.lastActivityAt))
+    }
+    return Date.now() - Math.max(0, ...points)
   }
 
   // ---- nudging -------------------------------------------------------------

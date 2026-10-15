@@ -4,6 +4,7 @@
 // mocking: `settleMs: 20`, `minNudgeIntervalMs: 120`, `stallMinutes: 0.005`
 // (= 300 ms), `maxNoProgressNudges: 3`.
 import { describe, expect, test } from "bun:test"
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs"
 import type { MarkdownCache, MarkdownItem, MarkdownState, ParsedFile } from "./markdown"
 import { parseOptions } from "./options"
 import type { TodoItem, TodoStore } from "./storage"
@@ -122,9 +123,16 @@ const dispatch = (h: H, type: string, data: Record<string, unknown>) => h.sup.ha
 const idle = (h: H, sessionID = "s1") =>
   dispatch(h, "session.status", { sessionID, status: { type: "idle" } })
 
-const shellCreated = (h: H, sessionID: string, shellID: string, command: string) =>
+const shellCreated = (h: H, sessionID: string, shellID: string, command: string, file?: string) =>
   dispatch(h, "shell.created", {
-    info: { id: shellID, status: "running", command, metadata: { sessionID }, time: { started: Date.now() } },
+    info: {
+      id: shellID,
+      status: "running",
+      command,
+      ...(file ? { file } : {}),
+      metadata: { sessionID },
+      time: { started: Date.now() },
+    },
   })
 
 function seed(h: H, sessionID: string, items: TodoItem[], ref: SessionRef = { projectID: "proj-1" }): void {
@@ -722,5 +730,50 @@ describe("activity spans & the idle model (§12)", () => {
     expect(h.calls.length).toBe(1)
     expect(h.sup.getState("s1")?.tools.size).toBe(0)
     expect(h.sup.getState("s1")?.spans.size).toBe(0)
+  })
+
+  test("a child session's background shell keeps the parent out of the idle path", async () => {
+    const h = makeHarness()
+    seed(h, "s1", [item("one")])
+    h.state.sessions.set("c1", { projectID: "proj-1", parentID: "s1" })
+    await dispatch(h, "session.created", { sessionID: "c1", projectID: "proj-1", parentID: "s1" })
+    await shellCreated(h, "c1", "sh_child", "long build")
+    await idle(h)
+    await sleep(150)
+    expect(h.calls.length).toBe(0)
+    expect(h.sup.getState("s1")?.children.has("c1")).toBe(true)
+  })
+
+  test("a shell whose capture file keeps growing is not stalled", async () => {
+    const dir = "/tmp/opencode"
+    mkdirSync(dir, { recursive: true })
+    const file = `${dir}/capture-${process.pid}.out`
+    writeFileSync(file, "start\n")
+    const h = makeHarness()
+    seed(h, "s1", [item("one")])
+    await shellCreated(h, "s1", "sh_grow", "long build", file)
+    await idle(h)
+    // Keep writing output past one evaluation cycle: no events fire for stdout,
+    // so only the capture file reveals that the shell is alive.
+    for (let index = 0; index < 9; index += 1) {
+      await sleep(120)
+      appendFileSync(file, `line ${index}\n`)
+    }
+    expect(h.calls.length).toBe(0)
+    await sleep(1000)
+    expect(h.calls.length).toBe(1)
+    expect(h.calls[0]!.text).toContain('background shell "long build"')
+  })
+
+  test("a child that ended its turn stops counting as running work", async () => {
+    const h = makeHarness()
+    seed(h, "s1", [item("one")])
+    h.state.sessions.set("c1", { projectID: "proj-1", parentID: "s1" })
+    await dispatch(h, "session.created", { sessionID: "c1", projectID: "proj-1", parentID: "s1" })
+    await dispatch(h, "session.step.started", { sessionID: "c1" })
+    await dispatch(h, "session.step.ended", { sessionID: "c1", finish: "stop" })
+    await idle(h)
+    await sleep(140)
+    expect(h.calls.length).toBe(1)
   })
 })
