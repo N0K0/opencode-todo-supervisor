@@ -41,9 +41,35 @@ export function truncate(value: string, max = 500): string {
   return value.length <= max ? value : `${value.slice(0, max)}…(${value.length - max} more)`
 }
 
-// "running" is fed by `session.status` `{type:"busy"}`; "requires_action" by
-// pending permission/form blockers; the event status union is idle|retry|busy (§12).
+// "running" is fed by open activity spans and `session.status` `{type:"busy"}`;
+// "requires_action" by pending permission/form blockers; the event status union
+// is idle|retry|busy (§12).
 type SStatus = "idle" | "running" | "requires_action" | "unknown"
+
+/**
+ * Activity spans (§12 idle model): anything the runtime is *currently doing*.
+ * A span is opened by a `*.started` (or `.called`) event and closed by its
+ * matching `*.ended`/`.success`/`.failed`. The session is idle only when no
+ * span, tool, shell or child is open — thinking (`reasoning`), preparing a tool
+ * (`tool-input`), a running tool call (`tools`) and a running turn all keep it
+ * busy, independent of the (unreliable here) `session.status` stream.
+ */
+type SpanKind = "turn" | "step" | "reasoning" | "text" | "tool-input" | "inbox"
+
+type Span = {
+  kind: SpanKind
+  startedAt: number
+  lastActivityAt: number
+}
+
+type RunningTool = {
+  /** Tool name from `session.tool.input.started` (e.g. `task`, `shell`). */
+  name: string
+  /** Best-effort label from `session.tool.called` input (`description`/`command`). */
+  label?: string
+  startedAt: number
+  lastActivityAt: number
+}
 
 type Shell = {
   startedAt: number
@@ -54,6 +80,8 @@ type Shell = {
 type Stalled = {
   children: string[]
   shells: string[]
+  tools: string[]
+  spans: string[]
   quietMs?: number
 }
 
@@ -66,6 +94,17 @@ type SessionState = {
   blocked: Set<"permission" | "form">
   children: Set<string>
   shells: Map<string, Shell>
+  /** Open activity spans, keyed by kind (one per kind). */
+  spans: Map<SpanKind, Span>
+  /** In-flight tool calls, keyed by call id. */
+  tools: Map<string, RunningTool>
+  /**
+   * Timestamp of the last confirmed end-of-turn signal (`step.ended` with
+   * `finish:"stop"`, `execution.succeeded/failed/interrupted`, `status idle`).
+   * Cleared as soon as a new turn/step starts. When a runtime never emits such
+   * a signal the idle rule falls back to the stall window (§12).
+   */
+  terminalAt?: number
   evaluateTimer?: ReturnType<typeof setTimeout>
   retryTimer?: ReturnType<typeof setTimeout>
   sending: boolean
@@ -124,6 +163,16 @@ export interface SupervisorDeps {
 const RETRY_MS = 5000
 const RETRY_ATTEMPTS = 5
 const TIMER_EPSILON_MS = 500
+
+/** Human labels for still-open activity spans in stall nudges (§5.4). */
+const SPAN_LABELS: Record<string, string> = {
+  turn: "open turn",
+  step: "open step",
+  reasoning: "thinking (no deltas)",
+  text: "text stream",
+  "tool-input": "preparing a tool call",
+  inbox: "queued input",
+}
 
 /** Merged supervision sources (§5.8): the session list plus subscribed markdown files. */
 type Sources = {
@@ -204,6 +253,8 @@ export class Supervisor {
         blocked: new Set(),
         children: new Set(),
         shells: new Map(),
+        spans: new Map(),
+        tools: new Map(),
         sending: false,
         nudges: 0,
         noProgress: 0,
@@ -300,6 +351,10 @@ export class Supervisor {
       blocked: st.blocked.size,
       runningChildren,
       runningShells: st.shells.size,
+      runningTools: st.tools.size,
+      spans: [...st.spans.keys()],
+      quietMs: this.quietMs(st, undefined),
+      terminal: st.terminalAt !== undefined,
       nudges: st.nudges,
       noProgress: st.noProgress,
     }
@@ -347,6 +402,90 @@ export class Supervisor {
       clearTimeout(st.evaluateTimer)
       st.evaluateTimer = undefined
     }
+  }
+
+  // ---- activity spans (§12 idle model) -------------------------------------
+
+  /**
+   * Opens (or refreshes) an activity span. Starting a turn/step invalidates the
+   * last end-of-turn signal, and any span marks the session as running.
+   */
+  private openSpan(st: SessionState, kind: SpanKind): void {
+    const now = Date.now()
+    const span = st.spans.get(kind)
+    if (span) span.lastActivityAt = now
+    else st.spans.set(kind, { kind, startedAt: now, lastActivityAt: now })
+    if (kind === "turn" || kind === "step") st.terminalAt = undefined
+    st.lastActivityAt = now
+    st.status = "running"
+  }
+
+  /** Progress inside a span (deltas, streamed steps). */
+  private touchSpan(st: SessionState, kind: SpanKind): void {
+    const now = Date.now()
+    const span = st.spans.get(kind)
+    if (span) span.lastActivityAt = now
+    st.lastActivityAt = now
+  }
+
+  private closeSpan(st: SessionState, kind: SpanKind): void {
+    const now = Date.now()
+    const span = st.spans.get(kind)
+    if (span) span.lastActivityAt = now
+    st.spans.delete(kind)
+    st.lastActivityAt = now
+  }
+
+  /** Registers/refreshes an in-flight tool call (`task`, `shell`, …). */
+  private startTool(st: SessionState, id: string | undefined, name: string | undefined, label?: string): void {
+    if (!id) {
+      st.lastActivityAt = Date.now()
+      return
+    }
+    const now = Date.now()
+    const tool = st.tools.get(id)
+    if (tool) {
+      tool.lastActivityAt = now
+      if (name) tool.name = name
+      if (label) tool.label = label
+    } else {
+      st.tools.set(id, { name: name ?? "tool", label, startedAt: now, lastActivityAt: now })
+    }
+    st.lastActivityAt = now
+  }
+
+  private touchTool(st: SessionState, id: string | undefined): void {
+    const now = Date.now()
+    if (id) {
+      const tool = st.tools.get(id)
+      if (tool) tool.lastActivityAt = now
+    }
+    st.lastActivityAt = now
+  }
+
+  private endTool(st: SessionState, id: string): void {
+    st.tools.delete(id)
+    st.lastActivityAt = Date.now()
+  }
+
+  /** Human label for a running tool in stall nudges (§5.4). */
+  private toolLabel(tool: RunningTool): string {
+    return tool.label ? `${tool.name} "${tool.label}"` : tool.name
+  }
+
+  /**
+   * Confirmed end of turn: close every span, drop in-flight tool calls, mark the
+   * session idle and record the terminal timestamp. Spans can outlive their close
+   * event when a turn is interrupted or a generation reloads mid-call, so this
+   * signal is also what heals leaks (§12).
+   */
+  private endTurn(st: SessionState): void {
+    const now = Date.now()
+    st.spans.clear()
+    st.tools.clear()
+    st.status = "idle"
+    st.terminalAt = now
+    st.lastActivityAt = now
   }
 
   /** Called by the tools after `todo_write` (§5.2): reset counters, re-evaluate. */
@@ -481,12 +620,12 @@ export class Supervisor {
         if (!st) return
         const statusType = str(rec(data.status)?.type)
         if (statusType === "idle") {
-          st.status = "idle"
+          // Confirmed end of turn (§12): arm the idle evaluation.
+          this.endTurn(st)
           this.scheduleEvaluate(sessionID, options.settleMs)
         } else {
-          // busy | retry — actively working
-          st.status = "running"
-          this.cancelEvaluate(sessionID)
+          // busy | retry — the runtime is actively working.
+          this.openSpan(st, "turn")
         }
         return
       }
@@ -495,7 +634,7 @@ export class Supervisor {
         // Deprecated in 2.0.24 but still emitted; stays idempotent with session.status.
         const st = this.registry.get(sessionID)
         if (!st) return
-        st.status = "idle"
+        this.endTurn(st)
         this.scheduleEvaluate(sessionID, options.settleMs)
         return
       }
@@ -503,8 +642,7 @@ export class Supervisor {
       case "session.execution.started": {
         const st = this.registry.get(sessionID)
         if (!st) return
-        st.status = "running"
-        this.cancelEvaluate(sessionID)
+        this.openSpan(st, "turn")
         return
       }
 
@@ -512,7 +650,7 @@ export class Supervisor {
       case "session.execution.failed": {
         const st = this.registry.get(sessionID)
         if (!st) return
-        st.status = "idle"
+        this.endTurn(st)
         this.scheduleEvaluate(sessionID, options.settleMs)
         return
       }
@@ -520,7 +658,7 @@ export class Supervisor {
       case "session.execution.interrupted": {
         const st = this.registry.get(sessionID)
         if (!st) return
-        st.status = "idle"
+        this.endTurn(st)
         if (options.pauseOnInterrupt) {
           st.paused = true
           st.pauseReason = "interrupt"
@@ -530,19 +668,103 @@ export class Supervisor {
         return
       }
 
-      case "session.tool.input.started":
-      case "session.tool.input.ended":
-      case "session.tool.input.delta":
-      case "session.text.delta":
-      case "session.text.started":
-      case "session.text.ended":
-      case "session.reasoning.delta":
-      case "session.reasoning.started":
-      case "session.reasoning.ended":
-      case "session.step.started":
-      case "session.step.streamed":
-      case "session.step.ended":
-      case "session.step.failed":
+      case "session.step.started": {
+        const st = this.registry.get(sessionID)
+        if (!st) return
+        this.openSpan(st, "step")
+        return
+      }
+
+      case "session.step.streamed": {
+        const st = this.registry.get(sessionID)
+        if (st) this.touchSpan(st, "step")
+        return
+      }
+
+      case "session.step.ended": {
+        const st = this.registry.get(sessionID)
+        if (!st) return
+        if (str(data.finish) === "stop") {
+          // Final step of the turn — the authoritative idle signal (§12).
+          this.endTurn(st)
+          this.scheduleEvaluate(sessionID, options.settleMs)
+          return
+        }
+        // `tool-calls` (or an unknown finish): the turn continues, a tool call
+        // is expected next, so this must never arm the idle evaluation (§12).
+        this.closeSpan(st, "step")
+        st.terminalAt = undefined
+        st.status = "running"
+        return
+      }
+
+      case "session.step.failed": {
+        const st = this.registry.get(sessionID)
+        if (!st) return
+        this.closeSpan(st, "step")
+        return
+      }
+
+      case "session.reasoning.started": {
+        const st = this.registry.get(sessionID)
+        if (st) this.openSpan(st, "reasoning")
+        return
+      }
+
+      case "session.reasoning.delta": {
+        const st = this.registry.get(sessionID)
+        if (st) this.touchSpan(st, "reasoning")
+        return
+      }
+
+      case "session.reasoning.ended": {
+        const st = this.registry.get(sessionID)
+        if (st) this.closeSpan(st, "reasoning")
+        return
+      }
+
+      case "session.text.started": {
+        const st = this.registry.get(sessionID)
+        if (st) this.openSpan(st, "text")
+        return
+      }
+
+      case "session.text.delta": {
+        const st = this.registry.get(sessionID)
+        if (st) this.touchSpan(st, "text")
+        return
+      }
+
+      case "session.text.ended": {
+        const st = this.registry.get(sessionID)
+        if (st) this.closeSpan(st, "text")
+        return
+      }
+
+      case "session.tool.input.started": {
+        const st = this.registry.get(sessionID)
+        if (!st) return
+        this.openSpan(st, "tool-input")
+        this.startTool(st, str(data.id), str(data.name))
+        return
+      }
+
+      case "session.tool.input.delta": {
+        const st = this.registry.get(sessionID)
+        if (!st) return
+        this.touchSpan(st, "tool-input")
+        this.touchTool(st, str(data.id))
+        return
+      }
+
+      case "session.tool.input.ended": {
+        const st = this.registry.get(sessionID)
+        if (!st) return
+        this.closeSpan(st, "tool-input")
+        this.touchTool(st, str(data.id))
+        return
+      }
+
       case "message.part.updated": {
         const st = this.registry.get(sessionID)
         if (st) st.lastActivityAt = Date.now()
@@ -558,13 +780,17 @@ export class Supervisor {
           const shell = st.shells.get(shellID)
           if (shell) shell.lastActivityAt = Date.now()
         }
+        this.touchTool(st, str(data.id))
         return
       }
 
       case "session.tool.called": {
         const st = this.registry.get(sessionID)
         if (!st) return
-        st.lastActivityAt = Date.now()
+        // `input` is the only place a tool self-describes here (no `name` field):
+        // the task tool carries `description`, the shell tool `command`.
+        const input = rec(data.input)
+        this.startTool(st, str(data.id), str(data.name), str(input?.["description"]) ?? str(input?.["command"]))
         return
       }
 
@@ -572,7 +798,9 @@ export class Supervisor {
       case "session.tool.failed": {
         const st = this.registry.get(sessionID)
         if (!st) return
-        st.lastActivityAt = Date.now()
+        const id = str(data.id)
+        if (id) this.endTool(st, id)
+        else st.lastActivityAt = Date.now()
         return
       }
 
@@ -614,6 +842,8 @@ export class Supervisor {
       case "session.inbox.enqueued": {
         const st = this.registry.get(sessionID)
         if (!st) return
+        // A queued item is pending work, whether or not it is ours (§12).
+        this.openSpan(st, "inbox")
         const item = rec(data.item)
         const payload = rec(item?.["payload"])
         const metadata = rec(payload?.["metadata"])
@@ -625,6 +855,12 @@ export class Supervisor {
         st.pauseReason = undefined
         st.noProgress = 0
         this.scheduleEvaluate(sessionID, options.settleMs)
+        return
+      }
+
+      case "session.inbox.delivered": {
+        const st = this.registry.get(sessionID)
+        if (st) this.closeSpan(st, "inbox")
         return
       }
 
@@ -682,7 +918,6 @@ export class Supervisor {
     if (this.disposed) return
     const st = this.registry.get(sessionID)
     if (!st) return
-    if (st.status === "running") return
 
     const options = this.deps.options
     // Writes from the role that hosts tool execution are invisible to this cache:
@@ -719,13 +954,21 @@ export class Supervisor {
 
     const runningChildren = this.runningChildren(st)
     const activeShells = [...st.shells.entries()]
+    const runningTools = [...st.tools.values()]
+    const openSpans = [...st.spans.values()]
     const quiet = this.quietMs(st, runningChildren)
 
-    // `session.execution.*` fires per step, so `status` can read `idle` while the
-    // model is still thinking, streaming or preparing an edit. Only a session
-    // (and its children/shells) that has been quiet for the whole threshold is
-    // nudged (§12 busy-state fix).
-    if (runningChildren.length > 0 || activeShells.length > 0) {
+    // Anything the runtime is still doing keeps the session busy (§12): a running
+    // turn/step, thinking (`reasoning`), preparing a tool (`tool-input`), an
+    // in-flight tool call (a `task` subagent, a foreground shell), a background
+    // shell, a child session or a queued inbox item. Only after that work has been
+    // quiet for the whole stall window is a "check on it" nudge sent.
+    if (
+      runningChildren.length > 0 ||
+      activeShells.length > 0 ||
+      runningTools.length > 0 ||
+      openSpans.length > 0
+    ) {
       if (quiet < stallMs) {
         this.debugSkip(sessionID, `work quiet ${(quiet / 1000).toFixed(1)}s < ${options.stallMinutes}min`)
         this.scheduleEvaluate(sessionID, stallMs - quiet + TIMER_EPSILON_MS)
@@ -734,15 +977,21 @@ export class Supervisor {
       const stalled = {
         children: runningChildren.map((child) => child.sessionID),
         shells: activeShells.map(([, shell]) => shell.command ?? "(background shell)"),
+        tools: runningTools.map((tool) => this.toolLabel(tool)),
+        spans: openSpans.map((span) => span.kind),
         quietMs: quiet,
       }
       await this.nudge(sessionID, "stalled-task", stalled)
       return
     }
 
-    if (quiet < options.settleMs) {
-      this.debugSkip(sessionID, `recent activity (${quiet}ms < settleMs ${options.settleMs}ms)`)
-      this.scheduleEvaluate(sessionID, options.settleMs - quiet + TIMER_EPSILON_MS)
+    // Nothing is open. A confirmed end of turn arms a short debounce; a runtime
+    // that never emits one (no `session.status`/`execution.*` — see §12) falls
+    // back to the stall window, so supervision still works, just conservatively.
+    const threshold = st.terminalAt !== undefined ? options.settleMs : stallMs
+    if (quiet < threshold) {
+      this.debugSkip(sessionID, `recent activity (${quiet}ms < ${threshold}ms)`)
+      this.scheduleEvaluate(sessionID, threshold - quiet + TIMER_EPSILON_MS)
       return
     }
 
@@ -762,7 +1011,8 @@ export class Supervisor {
 
   /**
    * Milliseconds since the newest activity across the session, its running
-   * children and its tracked shells — the "is this really idle?" clock (§12).
+   * children, its tracked shells and its in-flight tool calls — the
+   * "is this really idle?" clock (§12).
    */
   private quietMs(st: SessionState, runningChildren?: SessionState[]): number {
     const children = runningChildren ?? this.runningChildren(st)
@@ -771,6 +1021,7 @@ export class Supervisor {
       st.lastActivityAt,
       ...children.map((child) => child.lastActivityAt),
       ...[...st.shells.values()].map((shell) => Math.max(shell.startedAt, shell.lastActivityAt)),
+      ...[...st.tools.values()].map((tool) => Math.max(tool.startedAt, tool.lastActivityAt)),
     )
     return Date.now() - newest
   }
@@ -811,10 +1062,12 @@ export class Supervisor {
       const who = [
         ...stalled.children.map((id) => `subagent ${id}`),
         ...stalled.shells.map((cmd) => `background shell "${cmd}"`),
-      ].join(" / ")
+        ...stalled.tools.map((tool) => `tool ${tool}`),
+        ...stalled.spans.map((span) => SPAN_LABELS[span] ?? span),
+      ]
       return (
         `[todo-supervisor] Stall nudge #${nudgeNumber} — no activity for ${formatQuiet(stalled.quietMs, this.deps.options.stallMinutes)} ` +
-        `from: ${who} (stall threshold ${this.deps.options.stallMinutes} min).\n` +
+        `from: ${who.length > 0 ? who.join(" / ") : "open work"} (stall threshold ${this.deps.options.stallMinutes} min).\n` +
         `Status: ${status}. Check its status, recover or restart it if stuck, then continue:\n${list}\n\n` +
         `Keep the list updated with todo_write; only end your turn once every item is completed or canceled.` +
         markdownNote
@@ -823,6 +1076,23 @@ export class Supervisor {
     return (
       `[todo-supervisor] Idle nudge #${nudgeNumber} — the session went idle with ${status}.\n${list}\n\n${footer}`
     )
+  }
+
+  /**
+   * One-line label rendered under the synthetic bubble (§12). Everything the
+   * model needs is in the message text; this only names what the nudge is about,
+   * so the TUI shows more than `◈ todo-supervisor`.
+   */
+  private describeNudge(
+    reason: "open-todos" | "stalled-task",
+    nudgeNumber: number,
+    stalled: Stalled | undefined,
+  ): string {
+    if (reason === "stalled-task" && stalled) {
+      const what = [...stalled.tools, ...stalled.children, ...stalled.shells, ...stalled.spans][0]
+      return what ? `todo-supervisor · stalled: ${what}` : "todo-supervisor · stalled"
+    }
+    return `todo-supervisor · nudge #${nudgeNumber}`
   }
 
   private async nudge(
@@ -861,7 +1131,9 @@ export class Supervisor {
         this.debugSkip(sessionID, "nudge aborted (blocked)")
         return
       }
-      if (st.status === "running") {
+      // An idle nudge must never land mid-turn; a stall nudge is *about* long
+      // running work, so it is allowed while a span/tool is still open (§12).
+      if (reason === "open-todos" && st.status === "running") {
         this.debugSkip(sessionID, "nudge aborted (running)")
         return
       }
@@ -903,13 +1175,14 @@ export class Supervisor {
       st.noProgress = 0
     }
 
-    const text = this.renderNudge(reason, st.nudges + 1, sources, stalled)
+    const nudgeNumber = st.nudges + 1
+    const text = this.renderNudge(reason, nudgeNumber, sources, stalled)
     st.sending = true
     try {
       await this.deps.synthetic({
         sessionID,
         text,
-        description: "todo-supervisor",
+        description: this.describeNudge(reason, nudgeNumber, stalled),
         metadata: { source: "todo-supervisor", reason },
       })
     } catch (err) {

@@ -257,15 +257,15 @@ describe("idle evaluation & nudging (aspect 7)", () => {
     expect(h.calls.length).toBe(1)
   })
 
-  test("unknown status after reconcile waits for fresh activity to settle", async () => {
+  test("without an end-of-turn signal the idle rule waits for the stall window", async () => {
     const h = makeHarness()
     seed(h, "s1", [item("one")])
-    await h.sup.reconcile() // schedules an evaluation, status stays "unknown"
+    await h.sup.reconcile() // schedules an evaluation; no terminal signal is ever seen
     await sleep(5)
     await dispatch(h, "session.tool.progress", { sessionID: "s1", id: "call_1", metadata: { shellID: "sh" } })
-    await sleep(100)
+    await sleep(150)
     expect(h.calls.length).toBe(0)
-    await sleep(600)
+    await sleep(900) // stall window (0.005 min = 300ms) + timer epsilon
     expect(h.calls.length).toBe(1)
   })
 
@@ -531,13 +531,19 @@ describe("guardrails & lifecycle (aspect 9)", () => {
       item: { type: "synthetic", payload: { text: "nudge" } },
       delivery: "queue",
     })
+    await dispatch(h, "session.inbox.delivered", { sessionID: "s1", inboxID: "in_synthetic" })
     await sleep(80)
+    expect(h.sup.getState("s1")?.paused).toBe(true)
     expect(h.calls.length).toBe(0)
+
     await dispatch(h, "session.inbox.enqueued", {
       sessionID: "s1",
       item: { type: "user", payload: { text: "hello" } },
       delivery: "queue",
     })
+    expect(h.sup.getState("s1")?.paused).toBe(false)
+    await dispatch(h, "session.inbox.delivered", { sessionID: "s1", inboxID: "in_user" })
+    await idle(h)
     await sleep(80)
     expect(h.calls.length).toBe(1)
   })
@@ -625,5 +631,96 @@ describe("registry & scope (aspect 6)", () => {
     await idle(newer)
     await sleep(80)
     expect(newer.calls.length).toBe(1)
+  })
+})
+
+// §12 idle model: activity spans. A session is nudged only when nothing the
+// runtime is doing is open and a confirmed end-of-turn signal was seen.
+describe("activity spans & the idle model (§12)", () => {
+  const started = (h: H, sessionID = "s1") => dispatch(h, "session.step.started", { sessionID })
+  const toolStart = (h: H, id: string, name: string, sessionID = "s1") =>
+    dispatch(h, "session.tool.input.started", { sessionID, id, name })
+  const toolCalled = (h: H, id: string, input: Record<string, unknown>, sessionID = "s1") =>
+    dispatch(h, "session.tool.called", { sessionID, id, input })
+  const stepEnd = (h: H, finish: string, sessionID = "s1") =>
+    dispatch(h, "session.step.ended", { sessionID, finish })
+
+  test("an in-flight task tool blocks the idle nudge; stopping the turn arms it", async () => {
+    const h = makeHarness()
+    seed(h, "s1", [item("one")])
+    await idle(h)
+    await started(h)
+    await toolStart(h, "call_task", "task")
+    await toolCalled(h, "call_task", { description: "Add the panel", subagent_type: "general" })
+    await sleep(150)
+    expect(h.calls.length).toBe(0)
+
+    await dispatch(h, "session.tool.success", { sessionID: "s1", id: "call_task" })
+    await stepEnd(h, "stop")
+    await sleep(120)
+    expect(h.calls.length).toBe(1)
+    expect(h.calls[0]!.text).toContain("Idle nudge #1")
+  })
+
+  test("finish=tool-calls keeps the turn open; only finish=stop arms the nudge", async () => {
+    const h = makeHarness()
+    seed(h, "s1", [item("one")])
+    await started(h)
+    await stepEnd(h, "tool-calls")
+    await idle(h)
+    await started(h)
+    await sleep(150)
+    expect(h.calls.length).toBe(0)
+
+    await stepEnd(h, "stop")
+    await sleep(120)
+    expect(h.calls.length).toBe(1)
+  })
+
+  test("a reasoning-only turn (thinking) is never nudged mid-turn", async () => {
+    const h = makeHarness(undefined, { settleMs: 60 })
+    seed(h, "s1", [item("one")])
+    await idle(h)
+    await started(h)
+    await dispatch(h, "session.reasoning.started", { sessionID: "s1" })
+    for (let index = 0; index < 6; index += 1) {
+      await sleep(40)
+      await dispatch(h, "session.reasoning.delta", { sessionID: "s1", text: "thinking…" })
+    }
+    expect(h.calls.length).toBe(0)
+
+    await dispatch(h, "session.reasoning.ended", { sessionID: "s1" })
+    await stepEnd(h, "stop")
+    await sleep(120)
+    expect(h.calls.length).toBe(1)
+  })
+
+  test("a tool call with no output for the stall window is named in the stall nudge", async () => {
+    const h = makeHarness()
+    seed(h, "s1", [item("one")])
+    await h.sup.reconcile() // arms an evaluation without any terminal signal
+    await started(h)
+    await toolStart(h, "call_task", "task")
+    await toolCalled(h, "call_task", { description: "Long subagent run" })
+    await sleep(420)
+    expect(h.calls.length).toBe(0)
+    await sleep(700)
+    expect(h.calls.length).toBe(1)
+    expect(h.calls[0]!.text).toContain("Stall nudge")
+    expect(h.calls[0]!.text).toContain('tool task "Long subagent run"')
+  })
+
+  test("a leaked tool/span is healed by the next end-of-turn signal", async () => {
+    const h = makeHarness()
+    seed(h, "s1", [item("one")])
+    await h.sup.reconcile()
+    await started(h)
+    await toolStart(h, "call_lost", "task")
+    // No tool.success / step.ended ever arrives for this call.
+    await idle(h)
+    await sleep(80)
+    expect(h.calls.length).toBe(1)
+    expect(h.sup.getState("s1")?.tools.size).toBe(0)
+    expect(h.sup.getState("s1")?.spans.size).toBe(0)
   })
 })
