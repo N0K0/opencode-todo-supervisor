@@ -253,10 +253,24 @@ export function footerHints(width: number): string[] {
     "d remove",
     "r refresh",
     "/ filter",
-    "f fullscreen",
+    "f resize",
     "esc close",
   ]
   if (width >= 110) return wide
   if (width >= 80) return wide.slice(0, 8)
   return ["↑↓", "space toggle", "n nudge", "/ filter", "esc"]
+}
+
+export type DialogSizeName = "medium" | "large" | "xlarge"
+
+/**
+ * Content width for the popover dialog. The host owns the dialog box, so the
+ * list sizes its rows from the render region instead and clamps for small
+ * terminals (a wider dialog just shows more of each row).
+ */
+export function dialogWidth(size: DialogSizeName, viewportWidth: number): number {
+  const total = Math.max(40, viewportWidth)
+  const bySize =
+    size === "xlarge" ? total - 8 : size === "large" ? total - 16 : Math.min(72, Math.max(48, total - 24))
+  return Math.max(36, Math.min(bySize, 140))
 }

@@ -2,18 +2,17 @@
 // todo-supervisor — OpenCode V2 CLI (TUI) plugin (PLAN.md §6, aspect 12).
 //
 // Contributions:
-// - composer strip (`session.composer.top`): one-line progress chip with an
-//   open/total count, progress bar and the supervision state;
-// - panel (`session.panel`, name `todo.todos`): header (progress + supervision
-//   chip), a scrollable body of session todos and one collapsible section per
-//   subscribed markdown file, and a width-aware footer with key hints; opened
-//   via `/todos`, the palette or `Todo: open list`;
+// - composer strip (`session.composer.top`): one-line progress chip;
+// - **popover**: `context.ui.dialog.show()` renders the todo list as a centered
+//   overlay, exactly like the host's own dialogs (`/todos` and the palette);
+// - side panel (`session.panel`, name `todo.todos`): the same list, docked to
+//   the session panel (palette "Todo: open side panel");
 // - toasts on `nudged` and on the all-done transition;
 // - RPC events (`updated`/`nudged`) keep a memory-store snapshot fresh.
 //
 // All layout math lives in ./panel.ts (pure, unit-tested); this file only maps
-// rows to OpenTUI elements. Only the plugin process may write markdown files —
-// the TUI calls RPC `toggleFile`, which rewrites the checkbox in place.
+// rows to OpenTUI elements. Only the server plugin may write markdown files —
+// the UI calls RPC `toggleFile`, which rewrites the checkbox in place.
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import type { PanelInput } from "@opencode/plugin/tui/context"
 import { Plugin, usePlugin, type Context } from "@opencode/plugin/tui"
@@ -22,6 +21,7 @@ import {
   buildRows,
   clampCursor,
   countOpen,
+  dialogWidth,
   footerHints,
   moveCursor,
   progressBar,
@@ -29,12 +29,16 @@ import {
   statusMark,
   supervisorChip,
   truncate,
+  type DialogSizeName,
   type PanelSnapshot,
   type Row,
 } from "./panel"
 import { TodoRpc } from "./rpc"
 
 type Store = { snapshots: Record<string, PanelSnapshot>; seenOpen: Record<string, number> }
+type DialogSize = DialogSizeName
+
+const SIZE_ORDER: DialogSize[] = ["medium", "large", "xlarge"]
 
 /** Defensive theme reader: unknown token shapes degrade to no color. */
 function themeColor(theme: unknown, path: string): string | undefined {
@@ -63,6 +67,26 @@ export default Plugin.define({
       const [state, update] = context.storage.memory<Store>("todo-supervisor", {
         initial: { snapshots: {}, seenOpen: {} },
       })
+
+      // Render-region width, kept reactive for resize (renderer.width is the
+      // region the TUI owns; `terminalWidth` would include any split footer).
+      const rendererWidth = () => {
+        const renderer = context.renderer as unknown as {
+          width?: number
+          root?: { width?: number }
+        }
+        const width = renderer.width ?? renderer.root?.width
+        return typeof width === "number" && width > 0 ? width : 100
+      }
+      const [viewportWidth, setViewportWidth] = createSignal(rendererWidth())
+      const onResize = (width: number) => {
+        if (typeof width === "number" && width > 0) setViewportWidth(width)
+      }
+      try {
+        context.renderer.on?.("resize" as never, onResize as never)
+      } catch (err) {
+        logFile("tui", `resize subscribe failed: ${String(err)}`)
+      }
 
       const toastError = (where: string, err: unknown) => {
         logFile("tui", `${where} failed: ${String(err)}`)
@@ -155,9 +179,20 @@ export default Plugin.define({
         )
       }
 
-      // ---- panel ------------------------------------------------------------
+      // ---- the list (shared by the popover and the side panel) --------------
 
-      function TodoPanel(props: { panel: PanelInput }) {
+      type ListProps = {
+        sessionID: string
+        /** Keymap layer is only live while this is true. */
+        active: () => boolean
+        /** Available content width (dialog width or panel width). */
+        width: () => number
+        close: () => void
+        /** Popover only: cycle the dialog size (medium → large → xlarge). */
+        cycleSize?: () => void
+      }
+
+      function TodoList(props: ListProps) {
         const themed = usePlugin()
         const [selected, setSelected] = createSignal<string | undefined>(undefined)
         const [filter, setFilter] = createSignal("")
@@ -167,8 +202,8 @@ export default Plugin.define({
           scrollTop?: number
         } | undefined
 
-        const sessionID = () => props.panel.sessionID
-        const width = () => props.panel.width
+        const sessionID = () => props.sessionID
+        const width = () => Math.max(30, props.width())
         const snap = (): PanelSnapshot => state.snapshots[sessionID()] ?? { items: [], files: [] }
         const rows = createMemo(() =>
           buildRows(snap(), {
@@ -296,7 +331,7 @@ export default Plugin.define({
 
         context.keymap.layer(() => ({
           mode: "global",
-          enabled: () => props.panel.focused,
+          enabled: () => props.active(),
           priority: 10,
           commands: [
             { title: "Todo: select next", bind: "down", run: () => move(1) },
@@ -341,7 +376,11 @@ export default Plugin.define({
                 }),
             },
             { title: "Todo: filter", bind: "/", run: applyFilter },
-            { title: "Todo: fullscreen", bind: "f", run: () => props.panel.toggleFullscreen() },
+            {
+              title: "Todo: resize",
+              bind: "f",
+              run: () => props.cycleSize?.(),
+            },
             {
               title: "Todo: clear list",
               bind: "c",
@@ -364,11 +403,11 @@ export default Plugin.define({
                     title: "Todo panel",
                     message:
                       "↑↓/jk move · space/x toggle · enter collapse · n nudge · s pause/resume\n" +
-                      "a add file · d remove file · r refresh · / filter · f fullscreen · c clear · esc close",
+                      "a add file · d remove file · r refresh · / filter · f resize · c clear · esc close",
                   })
                 }),
             },
-            { title: "Todo: close", bind: "escape", run: () => props.panel.close() },
+            { title: "Todo: close", bind: "escape", run: () => props.close() },
           ],
         }))
 
@@ -399,9 +438,7 @@ export default Plugin.define({
             return (
               <box backgroundColor={background()}>
                 <text fg={isCurrent() ? accent() : base()}>
-                  {prefix() +
-                    (row.collapsed ? "▸ " : "▾ ") +
-                    truncate(`${label}  ·  ${detail}`, contentWidth())}
+                  {prefix() + (row.collapsed ? "▸ " : "▾ ") + truncate(`${label}  ·  ${detail}`, contentWidth())}
                 </text>
               </box>
             )
@@ -441,6 +478,44 @@ export default Plugin.define({
         )
       }
 
+      // ---- popover (an overlay dialog, like the host's own panes) -----------
+
+      function TodoPopover(props: { sessionID: string }) {
+        const [size, setSize] = createSignal<DialogSize>("large")
+        const cycleSize = () => {
+          const next = SIZE_ORDER[(SIZE_ORDER.indexOf(size()) + 1) % SIZE_ORDER.length]!
+          setSize(next)
+          try {
+            context.ui.dialog.set({ size: next, centered: true })
+          } catch (err) {
+            logFile("tui", `dialog resize failed: ${String(err)}`)
+          }
+        }
+        return (
+          <TodoList
+            sessionID={props.sessionID}
+            active={() => true}
+            width={() => dialogWidth(size(), viewportWidth())}
+            close={() => context.ui.dialog.clear()}
+            cycleSize={cycleSize}
+          />
+        )
+      }
+
+      const openPopover = (sessionID: string): boolean => {
+        try {
+          context.ui.dialog.set({ size: "large", centered: true })
+          context.ui.dialog.show(
+            () => <TodoPopover sessionID={sessionID} />,
+            () => logFile("tui", "popover closed"),
+          )
+          return true
+        } catch (err) {
+          toastError("open popover", err)
+          return false
+        }
+      }
+
       // ---- slots, commands --------------------------------------------------
 
       const disposeStrip = context.ui.slot({
@@ -449,9 +524,15 @@ export default Plugin.define({
       })
       const disposePanel = context.ui.slot({
         append: "session.panel",
-        render: (panel) => (
+        render: (panel: PanelInput) => (
           <Show when={panel.name === "todo.todos"}>
-            <TodoPanel panel={panel} />
+            <TodoList
+              sessionID={panel.sessionID}
+              active={() => panel.focused}
+              width={() => panel.width}
+              close={() => panel.close()}
+              cycleSize={() => panel.toggleFullscreen()}
+            />
           </Show>
         ),
       })
@@ -467,8 +548,8 @@ export default Plugin.define({
         commands: [
           {
             id: "todo-supervisor.open",
-            title: "Todo: open list",
-            description: "Open the todo panel; /todos add <path> or /todos remove <path> manages files",
+            title: "Todo: open todos",
+            description: "Open the todo popover; /todos add <path> or /todos remove <path> manages files",
             group: "Todo",
             palette: true,
             slash: { name: "todos", arguments: true },
@@ -501,6 +582,20 @@ export default Plugin.define({
                 })
                 return
               }
+              if (!sessionID) {
+                notify("Open a session first", "warning")
+                return
+              }
+              openPopover(sessionID)
+            },
+          },
+          {
+            id: "todo-supervisor.open-panel",
+            title: "Todo: open side panel",
+            description: "Dock the todo list to the session panel instead of the popover",
+            group: "Todo",
+            palette: true,
+            run: () => {
               if (!context.ui.panel.open("todo.todos")) {
                 notify("Open a session to view todos", "warning")
               }
@@ -515,6 +610,11 @@ export default Plugin.define({
         offNudged()
         disposeStrip()
         disposePanel()
+        try {
+          context.renderer.off?.("resize" as never, onResize as never)
+        } catch {
+          // best-effort
+        }
         logFile("tui", "disposed")
       }
     }

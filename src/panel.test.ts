@@ -4,6 +4,7 @@ import {
   buildRows,
   clampCursor,
   countOpen,
+  dialogWidth,
   footerHints,
   isSelectable,
   moveCursor,
@@ -169,5 +170,15 @@ describe("panel cursor", () => {
     expect(footerHints(120).length).toBe(11)
     expect(footerHints(90).length).toBe(8)
     expect(footerHints(40)).toEqual(["↑↓", "space toggle", "n nudge", "/ filter", "esc"])
+  })
+
+  test("popover width follows the dialog size and clamps", () => {
+    expect(dialogWidth("medium", 200)).toBe(72)
+    expect(dialogWidth("large", 200)).toBe(140)
+    expect(dialogWidth("xlarge", 200)).toBe(140)
+    expect(dialogWidth("medium", 80)).toBe(56)
+    expect(dialogWidth("large", 80)).toBe(64)
+    expect(dialogWidth("xlarge", 80)).toBe(72)
+    expect(dialogWidth("xlarge", 20)).toBe(36)
   })
 })
