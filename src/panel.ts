@@ -253,12 +253,25 @@ export function footerHints(width: number): string[] {
     "d remove",
     "r refresh",
     "/ filter",
-    "f resize",
+    "f size",
+    "c clear",
+    "? help",
     "esc close",
   ]
-  if (width >= 110) return wide
+  if (width >= 120) return wide
   if (width >= 80) return wide.slice(0, 8)
-  return ["↑↓", "space toggle", "n nudge", "/ filter", "esc"]
+  return ["↑↓", "space toggle", "n nudge", "/ filter", "? help", "esc"]
+}
+
+/**
+ * Rows the popover list body may occupy. The dialog hugs its content, so the
+ * body must be bounded or the overlay grows to the whole screen; the cap keeps
+ * it a popover and leaves room for the header and the key legend. `extraRows`
+ * accounts for conditional chrome (e.g. the filter line).
+ */
+export function popoverBodyHeight(viewportHeight: number, extraRows = 0): number {
+  const total = Math.max(10, viewportHeight)
+  return Math.max(4, Math.min(total - 10 - Math.max(0, extraRows), 16))
 }
 
 export type DialogSizeName = "medium" | "large" | "xlarge"

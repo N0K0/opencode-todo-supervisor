@@ -8,6 +8,7 @@ import {
   footerHints,
   isSelectable,
   moveCursor,
+  popoverBodyHeight,
   progressBar,
   quietLabel,
   statusMark,
@@ -167,9 +168,17 @@ describe("panel cursor", () => {
   })
 
   test("footer hints shrink with the terminal width", () => {
-    expect(footerHints(120).length).toBe(11)
+    expect(footerHints(140).length).toBe(13)
     expect(footerHints(90).length).toBe(8)
-    expect(footerHints(40)).toEqual(["↑↓", "space toggle", "n nudge", "/ filter", "esc"])
+    expect(footerHints(40)).toEqual(["↑↓", "space toggle", "n nudge", "/ filter", "? help", "esc"])
+  })
+
+  test("popover body height stays a popover on any terminal", () => {
+    expect(popoverBodyHeight(40)).toBe(16)
+    expect(popoverBodyHeight(24)).toBe(14)
+    expect(popoverBodyHeight(24, 1)).toBe(13)
+    expect(popoverBodyHeight(14)).toBe(4)
+    expect(popoverBodyHeight(50, 2)).toBe(16)
   })
 
   test("popover width follows the dialog size and clamps", () => {

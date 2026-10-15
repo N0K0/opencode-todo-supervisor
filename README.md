@@ -99,7 +99,7 @@ Subscribe files with `todo_subscribe`, the panel (`a` / `d`), or config. Effecti
 ## TUI
 
 - **Composer strip** (`session.composer.top`): `📋 ███░░░░░ 8/17 open` (plus `⏸` while paused), hidden when there is neither a list nor subscriptions.
-- **Popover** (`/todos`, palette "Todo: open todos"): the list opens as a centered overlay dialog, like the host's own panes. `f` cycles the dialog size (medium → large → xlarge) and the rows re-truncate to the new width; `esc` closes it.
+- **Popover** (`/todos`, palette "Todo: open todos"): the list opens as a centered overlay dialog, like the host's own panes. The body is **height-bounded** (up to 16 rows, fewer on short terminals) so the overlay stays a popover and the key legend at the bottom is always visible; the header shows `open/total` plus the selected `row n/m` when the list is longer than the body. `f` cycles the dialog size (medium → large → xlarge) and rows re-truncate to the new width; `esc` closes it.
   - header: progress bar, `open/total`, and a supervision chip (`idle · quiet 12s · nudges 2`, `working: 1 tool · 1 shell · quiet 4s`, `paused (no-progress)`, `not supervised`);
   - body: a `SESSION` section, then one collapsible section per subscribed file (`n open of m`, `(missing)` badge, `:line` refs); the selected row is highlighted and kept on screen;
   - keys: `↑↓`/`jk` move, `pgup`/`pgdn`, `home`/`end`/`g`/`G`, `space`/`x` toggle (session item, markdown item, or collapse a file row), `enter` collapse, `n` nudge now, `s` pause/resume supervision, `a` add file, `d` remove file, `r` refresh, `/` filter, `f` resize, `c` clear (confirm), `?` help, `escape` close;

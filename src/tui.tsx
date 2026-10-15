@@ -24,6 +24,7 @@ import {
   dialogWidth,
   footerHints,
   moveCursor,
+  popoverBodyHeight,
   progressBar,
   rowIndex,
   statusMark,
@@ -79,8 +80,19 @@ export default Plugin.define({
         return typeof width === "number" && width > 0 ? width : 100
       }
       const [viewportWidth, setViewportWidth] = createSignal(rendererWidth())
-      const onResize = (width: number) => {
+      // Render-region height, reactive for resize (bounds the popover body).
+      const rendererHeight = () => {
+        const renderer = context.renderer as unknown as {
+          height?: number
+          root?: { height?: number }
+        }
+        const height = renderer.height ?? renderer.root?.height
+        return typeof height === "number" && height > 0 ? height : 24
+      }
+      const [viewportHeight, setViewportHeight] = createSignal(rendererHeight())
+      const onResize = (width: number, height: number) => {
         if (typeof width === "number" && width > 0) setViewportWidth(width)
+        if (typeof height === "number" && height > 0) setViewportHeight(height)
       }
       try {
         context.renderer.on?.("resize" as never, onResize as never)
@@ -187,6 +199,8 @@ export default Plugin.define({
         active: () => boolean
         /** Available content width (dialog width or panel width). */
         width: () => number
+        /** Bounded body rows (popover); undefined lets the host size the panel. */
+        height?: () => number
         close: () => void
         /** Popover only: cycle the dialog size (medium → large → xlarge). */
         cycleSize?: () => void
@@ -418,6 +432,22 @@ export default Plugin.define({
           return { total, open }
         }
 
+        /** Selected position among selectable rows, e.g. `2/9` (windowed lists). */
+        const position = () => {
+          const selectable = rows().filter((row) => row.kind !== "section")
+          const key = cursor()
+          const index = selectable.findIndex((row) => row.key === key)
+          return index === -1 ? undefined : { index: index + 1, total: selectable.length }
+        }
+
+        const bodyHeight = () => {
+          const available = props.height?.()
+          if (available === undefined) return undefined
+          // The filter line, when shown, takes one row from the body budget.
+          const filtered = (filter() ?? "") !== "" ? 1 : 0
+          return Math.max(3, available - filtered)
+        }
+
         const barWidth = () => Math.max(6, Math.min(24, width() - 44))
 
         const renderRow = (row: Row) => {
@@ -455,16 +485,21 @@ export default Plugin.define({
         }
 
         return (
-          <box flexDirection="column" flexGrow={1}>
+          <box flexDirection="column">
             <text fg={base()}>
               {"Todos  " + progressBar(totals().total - totals().open, totals().total, barWidth()) + "  "}
-              {`${totals().open}/${totals().total} open`}
+              {`${totals().open}/${totals().total} open` +
+                (position() ? `  ·  row ${position()!.index}/${position()!.total}` : "")}
             </text>
             <text fg={muted()}>{"supervision: " + supervisorChip(snap().supervisor)}</text>
             <Show when={(filter() ?? "") !== ""}>
               <text fg={muted()}>{`filter: "${filter()}"  (press / to change)`}</text>
             </Show>
-            <scrollbox ref={(node: unknown) => (scrollNode = node as typeof scrollNode)} flexGrow={1}>
+            <scrollbox
+              ref={(node: unknown) => (scrollNode = node as typeof scrollNode)}
+              height={bodyHeight()}
+              flexGrow={bodyHeight() === undefined ? 1 : undefined}
+            >
               <For each={rows()}>
                 {(row) => (
                   <box id={rowId(row.key)} flexDirection="row">
@@ -496,6 +531,7 @@ export default Plugin.define({
             sessionID={props.sessionID}
             active={() => true}
             width={() => dialogWidth(size(), viewportWidth())}
+            height={() => popoverBodyHeight(viewportHeight())}
             close={() => context.ui.dialog.clear()}
             cycleSize={cycleSize}
           />
