@@ -2,37 +2,48 @@
 // todo-supervisor — OpenCode V2 CLI (TUI) plugin (PLAN.md §6, aspect 12).
 //
 // Contributions:
-// - composer strip (`session.composer.top`): combined open counts, hidden when
-//   the session has neither todos nor subscriptions;
-// - panel (`session.panel`, name `todo.todos`): session items + one block per
-//   subscribed markdown file, opened via `/todos`, the palette or the `Todo:
-//   open list` command; actions up/down/x/n/c/r/a/d/f/escape;
+// - composer strip (`session.composer.top`): one-line progress chip with an
+//   open/total count, progress bar and the supervision state;
+// - panel (`session.panel`, name `todo.todos`): header (progress + supervision
+//   chip), a scrollable body of session todos and one collapsible section per
+//   subscribed markdown file, and a width-aware footer with key hints; opened
+//   via `/todos`, the palette or `Todo: open list`;
 // - toasts on `nudged` and on the all-done transition;
 // - RPC events (`updated`/`nudged`) keep a memory-store snapshot fresh.
 //
-// Files/items come from RPC `list`; the markdown parser behind it lands in
-// aspect 14 — the panel already renders whatever sections `list.files` reports.
-import { For, Show, createEffect, createSignal } from "solid-js"
+// All layout math lives in ./panel.ts (pure, unit-tested); this file only maps
+// rows to OpenTUI elements. Only the plugin process may write markdown files —
+// the TUI calls RPC `toggleFile`, which rewrites the checkbox in place.
+import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import type { PanelInput } from "@opencode/plugin/tui/context"
 import { Plugin, usePlugin, type Context } from "@opencode/plugin/tui"
 import { logFile } from "./log"
+import {
+  buildRows,
+  clampCursor,
+  countOpen,
+  footerHints,
+  moveCursor,
+  progressBar,
+  rowIndex,
+  statusMark,
+  supervisorChip,
+  truncate,
+  type PanelSnapshot,
+  type Row,
+} from "./panel"
 import { TodoRpc } from "./rpc"
 
-type TodoItem = { content: string; status: string; priority?: string }
-type FileItem = { content: string; status: string; line?: number }
-type FileSection = { path: string; exists: boolean; items: FileItem[] }
-type SupervisorView = { paused?: boolean; pauseReason?: string | null; status?: string; nudges?: number }
-type Snapshot = { items: TodoItem[]; files: FileSection[]; supervisor?: SupervisorView; at: number }
-type Store = { snapshots: Record<string, Snapshot>; seenOpen: Record<string, number> }
+type Store = { snapshots: Record<string, PanelSnapshot>; seenOpen: Record<string, number> }
 
-function statusMark(status: string): string {
-  if (status === "completed") return "[x]"
-  if (status === "in_progress") return "[~]"
-  return "[ ]"
-}
-
-function openCount(items: readonly { status: string }[]): number {
-  return items.filter((item) => item.status !== "completed").length
+/** Defensive theme reader: unknown token shapes degrade to no color. */
+function themeColor(theme: unknown, path: string): string | undefined {
+  let node: unknown = theme
+  for (const key of path.split(".")) {
+    if (!node || typeof node !== "object") return undefined
+    node = (node as Record<string, unknown>)[key]
+  }
+  return typeof node === "string" ? node : undefined
 }
 
 export default Plugin.define({
@@ -46,338 +57,466 @@ export default Plugin.define({
     }
 
     function register(context: Context) {
-    logFile("tui", "setup", context.app.version ?? "")
-    const rpc = context.client.rpc(TodoRpc)
-    // Memory store: survives plugin hot reloads (old/new generations share it).
-    const [state, update] = context.storage.memory<Store>("todo-supervisor", {
-      initial: { snapshots: {}, seenOpen: {} },
-    })
+      logFile("tui", "setup", context.app.version ?? "")
+      const rpc = context.client.rpc(TodoRpc)
+      // Memory store: survives plugin hot reloads (old/new generations share it).
+      const [state, update] = context.storage.memory<Store>("todo-supervisor", {
+        initial: { snapshots: {}, seenOpen: {} },
+      })
 
-    const toastError = (where: string, err: unknown) => {
-      logFile("tui", `${where} failed: ${String(err)}`)
-      try {
-        context.ui.toast.show({ title: "todo-supervisor", message: `${where} failed`, variant: "error" })
-      } catch {
-        // toast is best-effort
-      }
-    }
-
-    const guard = (label: string, action: () => Promise<unknown>): void => {
-      action().catch((err) => toastError(label, err))
-    }
-
-    const refresh = async (sessionID: string) => {
-      try {
-        const result = (await rpc.list({ sessionID })) as {
-          items?: TodoItem[]
-          files?: FileSection[]
-          supervisor?: SupervisorView
-        }
-        const items = Array.isArray(result?.items) ? result.items : []
-        const files = Array.isArray(result?.files) ? result.files : []
-        const open = openCount(items) + files.reduce((sum, file) => sum + openCount(file.items ?? []), 0)
-        const total = items.length + files.reduce((sum, file) => sum + (file.items?.length ?? 0), 0)
-        const before = state.seenOpen[sessionID]
-        update((draft) => {
-          draft.snapshots[sessionID] = { items, files, supervisor: result?.supervisor, at: Date.now() }
-          draft.seenOpen[sessionID] = open
-        })
-        if (before !== undefined && before > 0 && open === 0 && total > 0) {
-          context.ui.toast.show({ title: "todo-supervisor", message: "All todos done 🎉", variant: "success", sessionID })
-        }
-      } catch (err) {
-        logFile("tui", `refresh(${sessionID}) failed: ${String(err)}`)
-      }
-    }
-
-    const offUpdated = rpc.events.on("updated", (event) => {
-      const sessionID = (event.data as { sessionID?: unknown }).sessionID
-      if (typeof sessionID === "string") void refresh(sessionID)
-    })
-    const offNudged = rpc.events.on("nudged", (event) => {
-      const data = event.data as { sessionID?: unknown }
-      if (typeof data.sessionID === "string") {
-        void refresh(data.sessionID)
+      const toastError = (where: string, err: unknown) => {
+        logFile("tui", `${where} failed: ${String(err)}`)
         try {
-          context.ui.toast.show({
-            title: "todo-supervisor",
-            message: "Continuing open todos…",
-            variant: "info",
-            sessionID: data.sessionID,
-          })
-        } catch (err) {
-          logFile("tui", `nudged toast failed: ${String(err)}`)
+          context.ui.toast.show({ title: "todo-supervisor", message: `${where} failed`, variant: "error" })
+        } catch {
+          // toast is best-effort
         }
       }
-    })
 
-    // ---- components ---------------------------------------------------------
+      const guard = (label: string, action: () => Promise<unknown>): void => {
+        action().catch((err) => toastError(label, err))
+      }
 
-    function Strip(props: { sessionID: string }) {
-      const themed = usePlugin()
-      createEffect(() => {
-        void refresh(props.sessionID)
+      const notify = (message: string, variant: "info" | "success" | "warning" = "info"): void => {
+        try {
+          context.ui.toast.show({ title: "todo-supervisor", message, variant })
+        } catch (err) {
+          logFile("tui", `toast failed: ${String(err)}`)
+        }
+      }
+
+      const refresh = async (sessionID: string) => {
+        try {
+          const result = (await rpc.list({ sessionID })) as PanelSnapshot | undefined
+          const items = Array.isArray(result?.items) ? result.items : []
+          const files = Array.isArray(result?.files) ? result.files : []
+          const open = countOpen(items) + files.reduce((sum, file) => sum + countOpen(file.items ?? []), 0)
+          const total = items.length + files.reduce((sum, file) => sum + (file.items?.length ?? 0), 0)
+          const before = state.seenOpen[sessionID]
+          update((draft) => {
+            draft.snapshots[sessionID] = { items, files, supervisor: result?.supervisor }
+            draft.seenOpen[sessionID] = open
+          })
+          if (before !== undefined && before > 0 && open === 0 && total > 0) {
+            context.ui.toast.show({ title: "todo-supervisor", message: "All todos done 🎉", variant: "success", sessionID })
+          }
+        } catch (err) {
+          logFile("tui", `refresh(${sessionID}) failed: ${String(err)}`)
+        }
+      }
+
+      const offUpdated = rpc.events.on("updated", (event) => {
+        const sessionID = (event.data as { sessionID?: unknown }).sessionID
+        if (typeof sessionID === "string") void refresh(sessionID)
       })
-      const snap = () => state.snapshots[props.sessionID]
-      const items = () => snap()?.items ?? []
-      const files = () => snap()?.files ?? []
-      const visible = () => items().length > 0 || files().length > 0
-      const sessionOpen = () => openCount(items())
-      const fileOpen = () => files().reduce((sum, file) => sum + openCount(file.items ?? []), 0)
-      return (
-        <Show when={visible()}>
-          <text fg={themed.theme?.text?.base}>
-            {"📋 " + (sessionOpen() + fileOpen()) + " open · session " + sessionOpen() + " · files " + fileOpen()}
-          </text>
-        </Show>
-      )
-    }
-
-    function TodoPanel(props: { panel: PanelInput }) {
-      const themed = usePlugin()
-      const [cursor, setCursor] = createSignal(0)
-      const sessionID = () => props.panel.sessionID
-      const snap = () => state.snapshots[sessionID()]
-      const items = () => snap()?.items ?? []
-      const files = () => snap()?.files ?? []
-      createEffect(() => {
-        void refresh(sessionID())
+      const offNudged = rpc.events.on("nudged", (event) => {
+        const data = event.data as { sessionID?: unknown; reason?: unknown }
+        if (typeof data.sessionID === "string") {
+          void refresh(data.sessionID)
+          try {
+            context.ui.toast.show({
+              title: "todo-supervisor",
+              message: data.reason === "stalled-task" ? "Checking stalled work…" : "Continuing open todos…",
+              variant: data.reason === "stalled-task" ? "warning" : "info",
+              sessionID: data.sessionID,
+            })
+          } catch (err) {
+            logFile("tui", `nudged toast failed: ${String(err)}`)
+          }
+        }
       })
 
-      const clamped = () => (items().length === 0 ? 0 : Math.min(cursor(), items().length - 1))
+      // ---- composer strip ---------------------------------------------------
+
+      function Strip(props: { sessionID: string }) {
+        const themed = usePlugin()
+        createEffect(() => {
+          void refresh(props.sessionID)
+        })
+        const snap = () => state.snapshots[props.sessionID]
+        const items = () => snap()?.items ?? []
+        const files = () => snap()?.files ?? []
+        const total = () => items().length + files().reduce((sum, file) => sum + (file.items?.length ?? 0), 0)
+        const open = () => countOpen(items()) + files().reduce((sum, file) => sum + countOpen(file.items ?? []), 0)
+        const paused = () => snap()?.supervisor?.paused === true
+        return (
+          <Show when={total() > 0}>
+            <text fg={themeColor(themed.theme, "text.base")}>
+              {"📋 " +
+                progressBar(total() - open(), total(), 8) +
+                " " +
+                open() +
+                "/" +
+                total() +
+                " open" +
+                (paused() ? " · ⏸" : "")}
+            </text>
+          </Show>
+        )
+      }
+
+      // ---- panel ------------------------------------------------------------
+
+      function TodoPanel(props: { panel: PanelInput }) {
+        const themed = usePlugin()
+        const [selected, setSelected] = createSignal<string | undefined>(undefined)
+        const [filter, setFilter] = createSignal("")
+        const [collapsed, setCollapsed] = createSignal<ReadonlySet<string>>(new Set<string>())
+        let scrollNode: {
+          scrollChildIntoView?: (id: string) => void
+          scrollTop?: number
+        } | undefined
+
+        const sessionID = () => props.panel.sessionID
+        const width = () => props.panel.width
+        const snap = (): PanelSnapshot => state.snapshots[sessionID()] ?? { items: [], files: [] }
+        const rows = createMemo(() =>
+          buildRows(snap(), {
+            filter: filter(),
+            collapsed: collapsed(),
+            formatPath: (path) => context.ui.format.path(path),
+          }),
+        )
+        const cursor = createMemo(() => clampCursor(rows(), selected()))
+        const current = createMemo(() => rows().find((row) => row.key === cursor()))
+        const rowId = (key: string) => `todo-row-${key}`
+
+        const base = () => themeColor(themed.theme, "text.base")
+        const muted = () => themeColor(themed.theme, "text.muted")
+        const accent = () => themeColor(themed.theme, "text.action.primary.base") ?? base()
+        const selectedBg = () =>
+          themeColor(themed.theme, "background.raised.high") ?? themeColor(themed.theme, "background.raised.base")
+
+        createEffect(() => {
+          void refresh(sessionID())
+        })
+        const poll = setInterval(() => void refresh(sessionID()), 3000)
+        onCleanup(() => clearInterval(poll))
+
+        // Keep the selected row on screen without owning the viewport height:
+        // `scrollChildIntoView` uses nearest-edge behaviour; `scrollTop = index`
+        // (row height is one line) is a guaranteed-visible fallback.
+        createEffect(() => {
+          const key = cursor()
+          if (!key || !scrollNode) return
+          try {
+            if (typeof scrollNode.scrollChildIntoView === "function") {
+              scrollNode.scrollChildIntoView(rowId(key))
+              return
+            }
+            if (typeof scrollNode.scrollTop === "number") {
+              scrollNode.scrollTop = Math.max(0, rowIndex(rows(), key))
+            }
+          } catch {
+            // scrolling is best-effort
+          }
+        })
+
+        const move = (delta: number) => setSelected(moveCursor(rows(), cursor(), delta))
+        const jumpHome = () => setSelected(moveCursor(rows(), undefined, 0))
+        const jumpEnd = () => setSelected(moveCursor(rows(), cursor(), Number.MAX_SAFE_INTEGER))
+
+        const toggleCollapse = (path: string) =>
+          setCollapsed((previous) => {
+            const next = new Set(previous)
+            if (next.has(path)) next.delete(path)
+            else next.add(path)
+            return next
+          })
+
+        const toggleSelected = () => {
+          const row = current()
+          if (!row) return
+          if (row.kind === "file") {
+            toggleCollapse(row.path)
+            return
+          }
+          if (row.kind !== "item") return
+          if (row.source === "session" && row.index !== undefined) {
+            guard("toggle", () => rpc.toggle({ sessionID: sessionID(), index: row.index! }))
+            return
+          }
+          if (row.path && row.line !== undefined) {
+            guard("toggle file item", () => rpc.toggleFile({ sessionID: sessionID(), path: row.path!, line: row.line! }))
+          }
+        }
+
+        const addFile = () =>
+          guard("add file", async () => {
+            const path = await context.ui.dialog.prompt({
+              title: "Subscribe to a markdown file",
+              description: "Checklist items in the file count as todos.",
+              placeholder: "TODO.md",
+            })
+            if (!path) return
+            await rpc.subscribe({ sessionID: sessionID(), path })
+            notify(`Subscribed: ${path}`, "success")
+          })
+
+        const removeFile = () =>
+          guard("remove file", async () => {
+            const row = current()
+            const direct = row && row.kind === "file" ? row.path : row && row.kind === "item" ? row.path : undefined
+            const files = snap().files
+            if (files.length === 0) {
+              notify("No subscribed files", "warning")
+              return
+            }
+            const path =
+              direct ??
+              (await context.ui.dialog.select({
+                title: "Unsubscribe file",
+                options: files.map((file) => ({ title: context.ui.format.path(file.path), value: file.path })),
+              }))
+            if (!path) return
+            await rpc.unsubscribe({ sessionID: sessionID(), path })
+            notify("Unsubscribed", "success")
+          })
+
+        const pauseResume = () => {
+          const paused = snap().supervisor?.paused === true
+          guard("supervision", async () => {
+            await rpc.setEnabled({ sessionID: sessionID(), enabled: paused })
+            notify(paused ? "Supervision resumed" : "Supervision paused", paused ? "success" : "warning")
+          })
+        }
+
+        const applyFilter = () =>
+          guard("filter", async () => {
+            const value = await context.ui.dialog.prompt({
+              title: "Filter todos",
+              description: "Case-insensitive substring match; empty clears the filter.",
+              value: filter() ?? undefined,
+              placeholder: "search",
+            })
+            if (value === undefined) return
+            setFilter(value)
+            setSelected(undefined)
+          })
+
+        context.keymap.layer(() => ({
+          mode: "global",
+          enabled: () => props.panel.focused,
+          priority: 10,
+          commands: [
+            { title: "Todo: select next", bind: "down", run: () => move(1) },
+            { title: "Todo: select previous", bind: "up", run: () => move(-1) },
+            { bind: "j", run: () => move(1) },
+            { bind: "k", run: () => move(-1) },
+            { title: "Todo: next page", bind: "pagedown", run: () => move(10) },
+            { title: "Todo: previous page", bind: "pageup", run: () => move(-10) },
+            { title: "Todo: first", bind: "home", run: jumpHome },
+            { title: "Todo: last", bind: "end", run: jumpEnd },
+            { bind: "g", run: jumpHome },
+            { bind: "G", run: jumpEnd },
+            { title: "Todo: toggle item", bind: "space", run: toggleSelected },
+            { title: "Todo: toggle item", bind: "x", run: toggleSelected },
+            {
+              title: "Todo: collapse section",
+              bind: "enter",
+              run: () => {
+                const row = current()
+                if (row?.kind === "file") toggleCollapse(row.path)
+              },
+            },
+            {
+              title: "Todo: nudge now",
+              bind: "n",
+              run: () =>
+                guard("nudge", async () => {
+                  await rpc.nudge({ sessionID: sessionID() })
+                  notify("Nudge sent", "success")
+                }),
+            },
+            { title: "Todo: pause/resume supervision", bind: "s", run: pauseResume },
+            { title: "Todo: add markdown file", bind: "a", run: addFile },
+            { title: "Todo: remove markdown file", bind: "d", run: removeFile },
+            {
+              title: "Todo: refresh",
+              bind: "r",
+              run: () =>
+                guard("refresh", async () => {
+                  await refresh(sessionID())
+                  notify("Refreshed")
+                }),
+            },
+            { title: "Todo: filter", bind: "/", run: applyFilter },
+            { title: "Todo: fullscreen", bind: "f", run: () => props.panel.toggleFullscreen() },
+            {
+              title: "Todo: clear list",
+              bind: "c",
+              run: () =>
+                guard("clear", async () => {
+                  const ok = await context.ui.dialog.confirm({
+                    title: "Clear todos",
+                    message: "Remove the session todo list? Markdown subscriptions stay.",
+                    label: { confirm: "Clear", cancel: "Cancel" },
+                  })
+                  if (ok) await rpc.clear({ sessionID: sessionID() })
+                }),
+            },
+            {
+              title: "Todo: help",
+              bind: "?",
+              run: () =>
+                guard("help", async () => {
+                  await context.ui.dialog.alert({
+                    title: "Todo panel",
+                    message:
+                      "↑↓/jk move · space/x toggle · enter collapse · n nudge · s pause/resume\n" +
+                      "a add file · d remove file · r refresh · / filter · f fullscreen · c clear · esc close",
+                  })
+                }),
+            },
+            { title: "Todo: close", bind: "escape", run: () => props.panel.close() },
+          ],
+        }))
+
+        const totals = () => {
+          const current = snap()
+          const total = current.items.length + current.files.reduce((sum, file) => sum + file.items.length, 0)
+          const open = countOpen(current.items) + current.files.reduce((sum, file) => sum + countOpen(file.items), 0)
+          return { total, open }
+        }
+
+        const barWidth = () => Math.max(6, Math.min(24, width() - 44))
+
+        const renderRow = (row: Row) => {
+          const isCurrent = () => row.key === cursor()
+          const prefix = () => (isCurrent() ? "❯ " : "  ")
+          const contentWidth = () => Math.max(8, width() - 6)
+          const background = () => (isCurrent() ? selectedBg() : undefined)
+          if (row.kind === "section") {
+            return (
+              <text fg={muted()}>
+                {prefix() + truncate(row.label + (row.detail ? "  ·  " + row.detail : ""), contentWidth())}
+              </text>
+            )
+          }
+          if (row.kind === "file") {
+            const label = row.exists ? row.label : `${row.label} (missing)`
+            const detail = `${row.open} open of ${row.total}`
+            return (
+              <box backgroundColor={background()}>
+                <text fg={isCurrent() ? accent() : base()}>
+                  {prefix() +
+                    (row.collapsed ? "▸ " : "▾ ") +
+                    truncate(`${label}  ·  ${detail}`, contentWidth())}
+                </text>
+              </box>
+            )
+          }
+          const suffix =
+            (row.priority ? ` (${row.priority})` : "") + (row.line !== undefined ? `  :${row.line}` : "")
+          return (
+            <box backgroundColor={background()}>
+              <text fg={row.status === "completed" ? muted() : isCurrent() ? accent() : base()}>
+                {prefix() + statusMark(row.status) + " " + truncate(row.content + suffix, contentWidth())}
+              </text>
+            </box>
+          )
+        }
+
+        return (
+          <box flexDirection="column" flexGrow={1}>
+            <text fg={base()}>
+              {"Todos  " + progressBar(totals().total - totals().open, totals().total, barWidth()) + "  "}
+              {`${totals().open}/${totals().total} open`}
+            </text>
+            <text fg={muted()}>{"supervision: " + supervisorChip(snap().supervisor)}</text>
+            <Show when={(filter() ?? "") !== ""}>
+              <text fg={muted()}>{`filter: "${filter()}"  (press / to change)`}</text>
+            </Show>
+            <scrollbox ref={(node: unknown) => (scrollNode = node as typeof scrollNode)} flexGrow={1}>
+              <For each={rows()}>
+                {(row) => (
+                  <box id={rowId(row.key)} flexDirection="row">
+                    {renderRow(row)}
+                  </box>
+                )}
+              </For>
+            </scrollbox>
+            <text fg={muted()}>{truncate(footerHints(width()).join("  ·  "), Math.max(10, width() - 2))}</text>
+          </box>
+        )
+      }
+
+      // ---- slots, commands --------------------------------------------------
+
+      const disposeStrip = context.ui.slot({
+        append: "session.composer.top",
+        render: (input) => <Strip sessionID={input.sessionID} />,
+      })
+      const disposePanel = context.ui.slot({
+        append: "session.panel",
+        render: (panel) => (
+          <Show when={panel.name === "todo.todos"}>
+            <TodoPanel panel={panel} />
+          </Show>
+        ),
+      })
+      logFile("tui", "slots registered (session.composer.top, session.panel todo.todos)")
+
+      const currentSessionID = () => {
+        const route = context.ui.router.current()
+        return route.type === "session" ? route.sessionID : undefined
+      }
 
       context.keymap.layer(() => ({
+        mode: "global",
         commands: [
           {
-            id: "todo-supervisor.panel.up",
-            title: "Todo: select previous",
-            bind: "up",
-            run: () => setCursor(Math.max(0, clamped() - 1)),
-          },
-          {
-            id: "todo-supervisor.panel.down",
-            title: "Todo: select next",
-            bind: "down",
-            run: () => setCursor(Math.min(Math.max(0, items().length - 1), clamped() + 1)),
-          },
-          {
-            id: "todo-supervisor.panel.toggle",
-            title: "Todo: toggle complete",
-            bind: "x",
-            run: () => {
-              const index = clamped()
-              if (!items()[index]) return
-              guard("toggle", () => rpc.toggle({ sessionID: sessionID(), index }))
-            },
-          },
-          {
-            id: "todo-supervisor.panel.nudge",
-            title: "Todo: nudge now",
-            bind: "n",
-            run: () =>
-              guard("nudge", async () => {
-                await rpc.nudge({ sessionID: sessionID() })
-                context.ui.toast.show({ title: "todo-supervisor", message: "Nudge sent", variant: "success" })
-              }),
-          },
-          {
-            id: "todo-supervisor.panel.clear",
-            title: "Todo: clear list",
-            bind: "c",
-            run: () =>
-              guard("clear", async () => {
-                const ok = await context.ui.dialog.confirm({
-                  title: "Clear todos",
-                  message: "Remove the session todo list? Markdown subscriptions stay.",
-                  label: { confirm: "Clear", cancel: "Cancel" },
-                })
-                if (ok) await rpc.clear({ sessionID: sessionID() })
-              }),
-          },
-          {
-            id: "todo-supervisor.panel.refresh",
-            title: "Todo: refresh",
-            bind: "r",
-            run: () => void refresh(sessionID()),
-          },
-          {
-            id: "todo-supervisor.panel.add",
-            title: "Todo: add file",
-            bind: "a",
-            run: () =>
-              guard("add file", async () => {
-                const path = await context.ui.dialog.prompt({
-                  title: "Subscribe to a markdown file",
-                  description: "Checklist items in the file count as todos.",
-                  placeholder: "TODO.md",
-                })
-                if (!path) return
-                await rpc.subscribe({ sessionID: sessionID(), path })
-                context.ui.toast.show({ title: "todo-supervisor", message: `Subscribed: ${path}`, variant: "success" })
-              }),
-          },
-          {
-            id: "todo-supervisor.panel.remove",
-            title: "Todo: remove file",
-            bind: "d",
-            run: () =>
-              guard("remove file", async () => {
-                const list = files()
-                if (list.length === 0) {
-                  context.ui.toast.show({ title: "todo-supervisor", message: "No subscribed files", variant: "warning" })
+            id: "todo-supervisor.open",
+            title: "Todo: open list",
+            description: "Open the todo panel; /todos add <path> or /todos remove <path> manages files",
+            group: "Todo",
+            palette: true,
+            slash: { name: "todos", arguments: true },
+            run: (input) => {
+              const args = String(input ?? "")
+                .trim()
+                .split(/\s+/)
+                .filter(Boolean)
+              const sessionID = currentSessionID()
+              const inSession = (action: (id: string) => Promise<unknown>) => {
+                if (!sessionID) {
+                  notify("Open a session first", "warning")
                   return
                 }
-                const choice = await context.ui.dialog.select({
-                  title: "Unsubscribe file",
-                  options: list.map((file) => ({ title: context.ui.format.path(file.path), value: file.path })),
+                guard("todos", () => action(sessionID))
+              }
+              if (args[0] === "add" && args[1]) {
+                const path = args[1]
+                inSession(async (id) => {
+                  await rpc.subscribe({ sessionID: id, path })
+                  notify(`Subscribed: ${path}`, "success")
                 })
-                if (!choice) return
-                await rpc.unsubscribe({ sessionID: sessionID(), path: choice })
-                context.ui.toast.show({ title: "todo-supervisor", message: "Unsubscribed", variant: "success" })
-              }),
-          },
-          {
-            id: "todo-supervisor.panel.fullscreen",
-            title: "Todo: fullscreen",
-            bind: "f",
-            run: () => props.panel.toggleFullscreen(),
-          },
-          {
-            id: "todo-supervisor.panel.close",
-            title: "Todo: close",
-            bind: "escape",
-            run: () => props.panel.close(),
+                return
+              }
+              if (args[0] === "remove" && args[1]) {
+                const path = args[1]
+                inSession(async (id) => {
+                  await rpc.unsubscribe({ sessionID: id, path })
+                  notify("Unsubscribed", "success")
+                })
+                return
+              }
+              if (!context.ui.panel.open("todo.todos")) {
+                notify("Open a session to view todos", "warning")
+              }
+            },
           },
         ],
       }))
 
-      const supervisorLine = () => {
-        const sup = snap()?.supervisor
-        if (!sup) return "supervision: —"
-        if (sup.paused === true) return "supervision: paused (" + String(sup.pauseReason ?? "paused") + ")"
-        return "supervision: " + String(sup.status ?? "unknown") + " · nudges " + String(sup.nudges ?? 0)
+      logFile("tui", "ready")
+      return () => {
+        offUpdated()
+        offNudged()
+        disposeStrip()
+        disposePanel()
+        logFile("tui", "disposed")
       }
-
-      return (
-        <box flexDirection="column">
-          <text>{"Todos — " + openCount(items()) + " open of " + items().length}</text>
-          <text>{supervisorLine()}</text>
-          <text>{"up/down move · x toggle · n nudge · c clear · r refresh · a add · d remove · f fullscreen"}</text>
-          <Show when={items().length === 0}>
-            <text>{"(no session todos — the agent records them with todo_write)"}</text>
-          </Show>
-          <For each={items()}>
-            {(item, index) => (
-              <text>
-                {(index() === clamped() ? "> " : "  ") +
-                  statusMark(item.status) +
-                  " " +
-                  item.content +
-                  (item.priority ? " (" + item.priority + ")" : "")}
-              </text>
-            )}
-          </For>
-          <For each={files()}>
-            {(file) => (
-              <box flexDirection="column">
-                <text>
-                  {"— " +
-                    (file.exists ? "" : "(missing) ") +
-                    context.ui.format.path(file.path) +
-                    " · " +
-                    openCount(file.items ?? []) +
-                    " open"}
-                </text>
-                <For each={file.items ?? []}>
-                  {(item) => (
-                    <text>
-                      {"    " + statusMark(item.status) + " " + item.content + (item.line ? " :" + item.line : "")}
-                    </text>
-                  )}
-                </For>
-              </box>
-            )}
-          </For>
-        </box>
-      )
-    }
-
-    // ---- slots, commands ----------------------------------------------------
-
-    const disposeStrip = context.ui.slot({
-      append: "session.composer.top",
-      render: (input) => <Strip sessionID={input.sessionID} />,
-    })
-    const disposePanel = context.ui.slot({
-      append: "session.panel",
-      render: (panel) => (
-        <Show when={panel.name === "todo.todos"}>
-          <TodoPanel panel={panel} />
-        </Show>
-      ),
-    })
-    logFile("tui", "slots registered (session.composer.top, session.panel todo.todos)")
-
-    const currentSessionID = () => {
-      const route = context.ui.router.current()
-      return route.type === "session" ? route.sessionID : undefined
-    }
-
-    context.keymap.layer(() => ({
-      mode: "global",
-      commands: [
-        {
-          id: "todo-supervisor.open",
-          title: "Todo: open list",
-          description: "Open the todo panel; /todos add <path> or /todos remove <path> manages files",
-          group: "Todo",
-          palette: true,
-          slash: { name: "todos", arguments: true },
-          run: (input) => {
-            const args = String(input ?? "")
-              .trim()
-              .split(/\s+/)
-              .filter(Boolean)
-            const sessionID = currentSessionID()
-            const inSession = (action: (id: string) => Promise<unknown>) => {
-              if (!sessionID) {
-                context.ui.toast.show({ title: "todo-supervisor", message: "Open a session first", variant: "warning" })
-                return
-              }
-              guard("todos", () => action(sessionID))
-            }
-            if (args[0] === "add" && args[1]) {
-              const path = args[1]
-              inSession(async (id) => {
-                await rpc.subscribe({ sessionID: id, path })
-                context.ui.toast.show({ title: "todo-supervisor", message: `Subscribed: ${path}`, variant: "success" })
-              })
-              return
-            }
-            if (args[0] === "remove" && args[1]) {
-              const path = args[1]
-              inSession(async (id) => {
-                await rpc.unsubscribe({ sessionID: id, path })
-                context.ui.toast.show({ title: "todo-supervisor", message: "Unsubscribed", variant: "success" })
-              })
-              return
-            }
-            if (!context.ui.panel.open("todo.todos")) {
-              context.ui.toast.show({ title: "todo-supervisor", message: "Open a session to view todos", variant: "warning" })
-            }
-          },
-        },
-      ],
-    }))
-
-    logFile("tui", "ready")
-    return () => {
-      offUpdated()
-      offNudged()
-      disposeStrip()
-      disposePanel()
-      logFile("tui", "disposed")
-    }
     }
   },
 })
