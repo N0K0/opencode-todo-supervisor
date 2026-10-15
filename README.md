@@ -78,6 +78,8 @@ The supervisor tracks **activity spans** rather than trusting a session status f
 
 - **Idle nudge**: only when *nothing* is open and the last signal was a real end of turn — `step.ended` with `finish:"stop"`, `execution.succeeded/failed/interrupted` or `status idle`. `settleMs` is just a debounce after that. A step ending with `finish:"tool-calls"` always means "the turn continues" and never arms a nudge.
 - **Stall nudge**: if work is still open but has produced no events for `stallMinutes`, a nudge names what is quiet: `subagent ses_…`, `background shell "cmd"`, `tool subagent "Add the panel"`, `open step`, `thinking (no deltas)`.
+- **Output counts as progress, not just events**: stdout of a shell/task goes to a capture file and appending to it emits no event at all, so the supervisor stats each tracked shell's capture (`shell.created.info.file`) and uses its mtime as activity. A task that keeps printing is never "stalled", no matter how few events it produces.
+- **Transitive clock**: a parent's quiet time includes the shells and tools of its still-busy children, and a child stops counting once it has ended its turn — so a subagent running a noisy build keeps the parent awake, while a finished subagent no longer does.
 - **Runtimes without end-of-turn signals**: if no terminal signal was ever seen for a session, the idle rule falls back to the `stallMinutes` window (more conservative, never chatty).
 - **Backstop**: `maxNoProgressNudges` consecutive nudges whose open-item hash did not change pause supervision (`pause … backing off until the list changes`); the next `todo_write` resumes it (`resume …`).
 - **Interrupts**: an interrupted execution pauses supervision so the agent never talks over a user decision.
@@ -97,11 +99,12 @@ Subscribe files with `todo_subscribe`, the panel (`a` / `d`), or config. Effecti
 ## TUI
 
 - **Composer strip** (`session.composer.top`): `📋 ███░░░░░ 8/17 open` (plus `⏸` while paused), hidden when there is neither a list nor subscriptions.
-- **Panel** `todo.todos` (`/todos`, palette "Todo: open list"):
+- **Popover** (`/todos`, palette "Todo: open todos"): the list opens as a centered overlay dialog, like the host's own panes. `f` cycles the dialog size (medium → large → xlarge) and the rows re-truncate to the new width; `esc` closes it.
   - header: progress bar, `open/total`, and a supervision chip (`idle · quiet 12s · nudges 2`, `working: 1 tool · 1 shell · quiet 4s`, `paused (no-progress)`, `not supervised`);
   - body: a `SESSION` section, then one collapsible section per subscribed file (`n open of m`, `(missing)` badge, `:line` refs); the selected row is highlighted and kept on screen;
-  - keys: `↑↓`/`jk` move, `pgup`/`pgdn`, `home`/`end`/`g`/`G`, `space`/`x` toggle (session item, markdown item, or collapse a file row), `enter` collapse, `n` nudge now, `s` pause/resume supervision, `a` add file, `d` remove file, `r` refresh, `/` filter, `f` fullscreen, `c` clear (confirm), `?` help, `escape` close;
-  - the panel re-reads every 3 s while open, so edits made outside OpenCode show up without waiting for an event.
+  - keys: `↑↓`/`jk` move, `pgup`/`pgdn`, `home`/`end`/`g`/`G`, `space`/`x` toggle (session item, markdown item, or collapse a file row), `enter` collapse, `n` nudge now, `s` pause/resume supervision, `a` add file, `d` remove file, `r` refresh, `/` filter, `f` resize, `c` clear (confirm), `?` help, `escape` close;
+  - the list re-reads every 3 s while open, so edits made outside OpenCode show up without waiting for an event.
+- **Side panel** (palette "Todo: open side panel"): the same list docked to `session.panel` (`todo.todos`), with `f` for fullscreen instead of resize.
 - `/todos add <path>` and `/todos remove <path>` manage subscriptions from the prompt.
 - **Toasts** on `nudged` (idle vs stalled wording) and on the all-done transition.
 
