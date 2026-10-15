@@ -254,9 +254,12 @@ Helper predicates:
 #### State
 
 ```ts
-// "running" is fed by `session.status` `{type:"busy"}`; "requires_action" by
-// pending permission/form blockers; the event status union is idle|retry|busy (§12).
+// "running" is fed by open activity spans and `session.status` `{type:"busy"}`;
+// "requires_action" by pending permission/form blockers; the event status union
+// is idle|retry|busy (§12).
 type SStatus = "idle" | "running" | "requires_action" | "unknown"
+
+type SpanKind = "turn" | "step" | "reasoning" | "text" | "tool-input" | "inbox"
 
 type SessionState = {
   sessionID: string
@@ -266,8 +269,13 @@ type SessionState = {
   lastActivityAt: number
   blocked: Set<"permission" | "form">   // pending user-facing blocks
   children: Set<string>                 // from session.created(parentID = this)
-  shells: Map<string, { startedAt: number }>  // background shell tool calls
+  shells: Map<string, { startedAt, lastActivityAt, command? }>  // background shells
+  spans: Map<SpanKind, { startedAt, lastActivityAt }>          // open activity (§12.19)
+  tools: Map<string, { name, label?, startedAt, lastActivityAt }>  // in-flight tool calls
+  terminalAt?: number                   // last confirmed end of turn (§12.19)
   evaluateTimer?: ReturnType<typeof setTimeout>
+  retryTimer?: ReturnType<typeof setTimeout>
+  sending: boolean
   nudges: number
   noProgress: number
   lastNudgedHash?: string
@@ -276,6 +284,12 @@ type SessionState = {
   pauseReason?: "interrupt" | "no-progress" | "disabled"
 }
 ```
+
+The session is **idle only when nothing is open**: no span, no in-flight tool
+call, no background shell, no running child and no queued inbox item. Thinking
+(`reasoning.started/ended`), preparing a tool (`tool.input.*`), a running tool —
+including a `task`/`subagent` call — and a running turn/step all keep it busy,
+independent of `session.status` (which this runtime does not always emit).
 
 Registry is fed exclusively by events; on startup, `scanAll()` in storage is reconciled against `ctx.session.get()`:
 
@@ -291,18 +305,30 @@ Single subscription, one `switch` on `event.type`; scope filter first: skip even
 | `session.created` | register; link `parentID`; if known todos → schedule evaluate |
 | `session.updated` | refresh `parentID`/`projectID` (titles not needed) |
 | `session.deleted` | unregister; `store.removeTodos`; emit RPC `updated` |
-| `session.status` | `status = data.status`; on `idle` → schedule evaluate; on `running` → cancel pending evaluate |
+| `session.status` | `idle` → `endTurn()` (see below) + schedule evaluate; `busy`/`retry` → `openSpan("turn")` |
 | `session.idle` | same as status idle (idempotent) |
-| `session.execution.started` | `status=running`, cancel pending evaluate |
-| `session.execution.succeeded/failed` | `status=idle`; schedule evaluate |
-| `session.execution.interrupted` | `status=idle`; if `pauseOnInterrupt` → `paused=true, pauseReason="interrupt"`; schedule evaluate |
-| `session.text.delta`, `session.reasoning.delta`, `session.tool.called/progress/success/failed/input.delta`, `session.step.started/ended/failed`, `message.part.updated` | `lastActivityAt = now` (this is the "output changes" signal) |
-| `session.tool.called` | if `tool === "shell"` and `input.background === true` → `shells.set(callID, {startedAt})`; if `tool === "subagent"` → remember pending child (session link normally arrives via `session.created`) |
-| `session.tool.success/failed` | if matching background `callID` → `shells.delete(callID)` |
+| `session.execution.started` | `openSpan("turn")` |
+| `session.execution.succeeded/failed` | `endTurn()`; schedule evaluate |
+| `session.execution.interrupted` | `endTurn()`; if `pauseOnInterrupt` → `paused=true, pauseReason="interrupt"`; schedule evaluate |
+| `session.step.started/streamed` | `openSpan("step")` / `touchSpan("step")` |
+| `session.step.ended` | `finish === "stop"` → `endTurn()` + schedule; otherwise (`tool-calls`) close the step, keep the turn open and **never** arm a nudge |
+| `session.step.failed` | close the step span |
+| `session.reasoning.started/delta/ended` | open/touch/close the `reasoning` span (thinking) |
+| `session.text.started/delta/ended` | open/touch/close the `text` span |
+| `session.tool.input.started/delta/ended` | open/touch/close the `tool-input` span (preparing a tool); `started` carries `name` → `startTool(id, name)` |
+| `session.tool.called` | `startTool(id, name, label?)` — `label` from `input.description`/`input.command` (`task`, `shell`, …) |
+| `session.tool.progress` | touch the session, the tool (`data.id`) and the shell (`metadata.shellID`) |
+| `session.tool.success/failed` | `endTool(id)` |
+| `message.part.updated` | `lastActivityAt = now` |
+| `session.inbox.enqueued` | `openSpan("inbox")`; for real (non-synthetic) items also `paused=false`, `noProgress=0`, schedule evaluate |
+| `session.inbox.delivered` | close the `inbox` span |
 | `permission.asked` / `permission.replied` | `blocked.add/delete("permission")`; on reply → schedule evaluate |
 | `form.created` / `form.replied/cancelled` | `blocked.add/delete("form")`; on resolve → schedule evaluate |
-| `session.inbox.enqueued` | real user input (synthetic items carry type `synthetic`; our nudges have `metadata.source === "todo-supervisor"`) → `paused=false`, `noProgress=0`, schedule evaluate |
-| `shell.created/exited/deleted` | informational (location-scoped shells); optional debug log |
+| `shell.created/exited/deleted` | background shell tracking (`info.metadata.sessionID`, `info.command`, `info.time.started`); location-scoped, so a `shellID → sessionID` map is kept |
+
+`endTurn()` closes every span, drops in-flight tool calls, sets `status="idle"` and
+records `terminalAt` — the authoritative end-of-turn signal, which also heals
+spans whose close event was lost (interrupt, reload mid-call).
 
 `debugEvents` logs `event.type` + `JSON.stringify(event.data)` (truncated) — used once in Phase 1 to lock field names.
 
@@ -313,34 +339,35 @@ Cancel+re-arm a per-session timer; always recompute from current state:
 ```
 evaluate(sessionID):
   st = registry[sessionID]
-  if !st or st.status === "running" → return
+  if !st → return
   await store.refreshTodos(sessionID)                                 # pick up writes made by another
-  items = store.getTodos(sessionID)                                   # role/instance (§12.13)
-  if !items or items.length === 0 or isDone(items) → return          # nothing to enforce
+  sources = collectSources(sessionID)                                 # role/instance (§12.13), merged §5.8
+  if !sources.supervised or sources.open === 0 → return               # nothing to enforce
   if !options.enabled or st.paused or st.blocked.size > 0 → return
   if st.status === "requires_action" → return                        # waiting on the user
 
-  runningChildren = [...st.children].filter(c => registry[c]?.status === "running")
-  runningShells   = [...st.shells.entries()]
+  runningChildren = children with status "running"
+  runningTools    = [...st.tools.values()]
+  openSpans       = [...st.spans.values()]
+  quiet           = now - max(st.lastActivityAt, children…, shells…, tools…)   # "quiet clock"
 
-  if runningChildren.length or runningShells.length:
-      newest = max(child.lastActivityAt for running children,
-                   max(shell.startedAt, shell.lastActivityAt) for shells)
-      # children: own registry entries (shared activity events)
-      # shells: registered from shell.created (info.metadata.sessionID, info.time.started,
-      #         info.command) in a shellID→sessionID map; activity reset by
-      #         session.tool.progress.metadata.shellID; cleared by shell.exited/deleted (§12.14)
-      idleFor = now - newest
-      if idleFor < stallMs → schedule(evaluate, stallMs - idleFor + ε); return
-      else → nudge(sessionID, reason="stalled-task", stalled=[...])   # §5.4 nudge
-      return
+  if runningChildren or shells or runningTools or openSpans:           # work is in flight
+      if quiet < stallMs → schedule(evaluate, stallMs - quiet + ε); return
+      else → nudge(sessionID, reason="stalled-task", stalled={children, shells, tools, spans})
+
+  # nothing open: a confirmed end of turn arms a short debounce, a runtime that
+  # never emits one falls back to the stall window (§12.19)
+  threshold = st.terminalAt !== undefined ? settleMs : stallMs
+  if quiet < threshold → schedule(evaluate, threshold - quiet + ε); return
 
   if now < st.nextEligibleAt → schedule(evaluate, st.nextEligibleAt - now + ε); return
   nudge(sessionID, reason="open-todos")
 ```
 
-`stallMs = stallMinutes * 60_000`.
-The `session.idle` handler always schedules with `settleMs` first, so automatic child-completion notifications win the race (avoid duplicate/competing wakes).
+`stallMs = stallMinutes * 60_000`. `settleMs` is only a debounce after a
+*confirmed* turn end (`terminalAt`) — it is never used to guess that a busy
+session has finished. Activity inside a turn reschedules through the stall
+window, so an open step/tool/shell/subagent cannot produce an idle nudge.
 
 #### `nudge(sessionID, reason)`
 
@@ -354,7 +381,7 @@ else:
 text = renderNudge(reason, items, stalledInfo)
 await ctx.session.synthetic({
   sessionID, text,
-  description: "todo-supervisor",
+  description: describeNudge(reason, n),   # "todo-supervisor · nudge #3" | "… · stalled: task "\"…\"" (§12.21)
   metadata: { source: "todo-supervisor", reason },
 })                                                     # catch: busy/409 → schedule retry in 5 s
 st.nudges += 1; st.lastNudgedHash = hash
@@ -374,9 +401,12 @@ when set so the model can order its next actions):
   Continue working through the list (start with the [~] item when present). Keep it updated
   with todo_write, and only end your turn once every item is completed or canceled.
   ```
-- `stalled-task` (`<quiet>` = measured quiet span, e.g. "~7.2 min"):
+- `stalled-task` (`<quiet>` = measured quiet span, e.g. "~7.2 min"; the `from:`
+  list names every open kind — subagent, background shell, **tool** (a `task`
+  call is printed as `tool subagent "Slow sleep probe"`) and any still-open span
+  such as `open step` or `thinking (no deltas)`):
   ```
-  [todo-supervisor] Stall nudge #N — no activity for <quiet> from: subagent <sessionID> / background shell "<cmd>" (stall threshold 5 min).
+  [todo-supervisor] Stall nudge #N — no activity for <quiet> from: subagent <sessionID> / background shell "<cmd>" / tool <name> "<label>" / open step (stall threshold 5 min).
   Status: <status>. Check its status, recover or restart it if stuck, then continue:
   <renderList(openItems)>
 
@@ -484,16 +514,17 @@ The entry is a **`.tsx` file** (`./tui` export): the host transpiles plugin file
 
 Components:
 
-1. **Composer strip** — `context.ui.slot({ append: "session.composer.top", render: ({ sessionID }) => <TodoStrip sessionID={sessionID} /> })`
-   renders combined counts across session + file tasks, e.g. `📋 4 open · session 1 · files 3` (hidden when both sources are empty). Reactive via a Solid signal fed from an RPC fetch + `updated` events.
+1. **Composer strip** — `context.ui.slot({ append: "session.composer.top", render: ({ sessionID }) => <Strip sessionID={sessionID} /> })`
+   renders a one-line progress chip, e.g. `📋 ███░░░░░ 8/17 open` (plus `⏸` while supervision is paused), hidden when both sources are empty. Reactive via a Solid signal fed from an RPC fetch + `updated` events.
 2. **Panel** — `context.ui.slot({ append: "session.panel", render: (panel) => <Show when={panel.name === "todo.todos"}><TodoPanel …/></Show> })`
-   - full list with status icons/priority, session title, supervisor status (nudges, paused, next nudge);
-   - Markdown sections: one block per subscribed file (path, `exists` flag, counts) with `path:line` rows; `a` adds a file (`context.ui.dialog.prompt`), `d` removes the selected subscription; file items are read-only here (the agent checks them off by editing the file);
-   - keyboard layer (`context.keymap.layer`) while focused: `x` toggle complete, `n` nudge now, `c` clear, `r` refresh; `f` fullscreen, `escape` close (host provides panel actions);
-   - opened via `context.ui.panel.open("todo.todos")`.
-3. **Commands** — `context.keymap.layer(() => ({ commands: [{ id: "todo.open", title: "Todo list", group: "Todo", palette: true, slash: { name: "todos" }, run: () => context.ui.panel.open("todo.todos") }] }))`.
-4. **Toasts** — subscribe to RPC `nudged`; when it matches the active session show `context.ui.toast.show({ title: "todo-supervisor", message: "Continuing open todos…" })`. On all-done transition show `"All todos done 🎉"`.
+   - **header**: progress bar, `open/total`, and a supervision chip (`idle · quiet 12s · nudges 2`, `working: 1 tool · 1 shell · quiet 4s`, `paused (no-progress)`, `not supervised`);
+   - **body** in a `<scrollbox>`: a `SESSION` section then one collapsible section per subscribed file (label, `n open of m`, `(missing)` badge, `path:line` rows); items show `[ ]`/`[~]`/`[x]`, priority and content truncated to the panel width; the selected row is highlighted (`❯` prefix + `background.raised.high`) and kept on screen via `scrollChildIntoView`;
+   - **keys** (keymap layer with `enabled: () => panel.focused`, so panel keys never leak globally): `↑↓/jk`, `pgup/pgdn`, `home/end/g/G`, `space`/`x` toggle (session item → RPC `toggle`; markdown item → RPC `toggleFile`; file row → collapse), `enter` collapse, `n` nudge, `s` pause/resume (`setEnabled`), `a` add file, `d` remove file, `r` refresh, `/` filter, `f` fullscreen, `c` clear, `?` help, `esc` close;
+   - **footer**: width-aware key hints (`footerHints`); a ~3 s poll while mounted complements the `updated`/`nudged` events for edits made outside the agent.
+3. **Commands** — `context.keymap.layer(() => ({ commands: [{ id: "todo-supervisor.open", title: "Todo: open list", group: "Todo", palette: true, slash: { name: "todos", arguments: true }, run: … }] }))`; `/todos add <path>` and `/todos remove <path>` manage subscriptions.
+4. **Toasts** — subscribe to RPC `nudged`; when it matches the active session show `context.ui.toast.show({ title: "todo-supervisor", message: "Continuing open todos…" | "Checking stalled work…" })`. On all-done transition show `"All todos done 🎉"`.
 5. **Data plumbing** — one snapshot store (`Record<sessionID, {items, files, supervisor}>` via `context.storage.memory`, so it survives plugin hot reloads); `context.client.rpc(TodoRpc)` provides the methods and `rpc.events.on("updated"|"nudged", …)` keeps it fresh; `usePlugin()` inside components for theme/context; open-count transitions drive the all-done toast.
+6. **Pure helpers** — all layout math lives in `src/panel.ts` (`buildRows`, `progressBar`, `truncate`, `supervisorChip`, cursor/window, `footerHints`) and is unit-tested in `src/panel.test.ts`; `src/tui.tsx` only maps rows to OpenTUI elements. Markdown checkboxes are written by the server plugin (RPC `toggleFile`), never by the TUI process.
 
 Note: this TUI plugin is loaded from the configured package (`./tui` export). No `cli.json` entry needed for normal use; see §7 fallback.
 
@@ -684,27 +715,29 @@ Each aspect lists its **tasks** (checkboxes) and the **acceptance criteria** tha
 ### Aspect 7 — Supervisor: idle evaluation & nudging (Phase 2b)
 
 **Tasks**
-- [ ] `session.status` / `session.idle` → schedule `evaluate()` after `settleMs`
-- [ ] `evaluate()` per §5.4: running/blocked/paused guards, timer re-arm
-- [ ] `nudge()` per §5.4: synthetic wake, metadata, template, counters, `nextEligibleAt`, 409 retry
+- [x] Activity spans (§12.19): `turn`/`step`/`reasoning`/`text`/`tool-input`/`inbox` opened and closed by their lifecycle events; `endTurn()` on `finish:"stop"` / `execution.succeeded/failed/interrupted` / `status idle`
+- [x] In-flight tool calls tracked by call id (`tool.input.started` → `name`, `tool.called` → `label`, `tool.success/failed` → close) so a running `task`/`subagent` blocks the idle nudge
+- [x] `evaluate()` per §5.4: span/tool/shell/child/stall branch, terminal-gated idle nudge (`terminalAt`), timer re-arm
+- [x] `nudge()` per §5.4: synthetic wake, `describeNudge()` label, metadata, template, counters, `nextEligibleAt`, 409 retry
 
 **Acceptance criteria**
-- S3: nudge fires `settleMs` (+ ≤2 s slack) after idle with open todos; after the list completes, no further nudges (S4) and none exist for done/canceled/empty lists.
-- Consecutive nudges for one session are ≥ `minNudgeIntervalMs` apart.
-- The synthetic input carries `metadata.source === "todo-supervisor"` and the rendered open list.
-- A 409 (busy) response is retried (≤5 s) and eventually delivered; no crash on either path.
+- [x] S3: nudge fires `settleMs` (+ ≤2 s slack) after a **confirmed** turn end with open todos; after the list completes, no further nudges (S4) and none exist for done/canceled/empty lists.
+- [x] A turn that is still open (thinking, preparing a tool, a running tool call, `finish:"tool-calls"`) never produces an idle nudge — unit tests + live (`work quiet 3.6s < 0.25min` while a shell and a subagent ran).
+- [x] Consecutive nudges for one session are ≥ `minNudgeIntervalMs` apart.
+- [x] The synthetic input carries `metadata.source === "todo-supervisor"`, the rendered open list and a descriptive label.
+- [x] A 409 (busy) response is retried (≤5 s) and eventually delivered; no crash on either path.
 
 ### Aspect 8 — Supervisor: running work & stall (Phase 3)
 
 **Tasks**
 - [x] Child tracking (`session.created.parentID`; child liveness via the shared activity events) — live: stall nudge named the quiet subagent `ses_ebef80748ffeJrgLpnDoSIYNF0`
 - [x] Background shell tracking via **shell lifecycle events** — `shell.created` (`info.metadata.sessionID` links to the session, `info.time.started`, `info.command`) → per-session `shells`; activity reset by `session.tool.progress.metadata.shellID`; cleared by `shell.exited`/`shell.deleted`; `tool.success` deliberately does *not* clear (it fires at launch) — see §12.14
-- [x] Stall branch in `evaluate()` (`idleFor ≥ stallMs` → `stalled-task` nudge)
+- [x] Stall branch in `evaluate()` generalized to **any open span** (§12.19): idle-for-`stallMs` → `stalled-task` nudge naming subagent(s), background shell(s), tool call(s) and open span(s)
 
 **Acceptance criteria**
-- [x] S5/S6: while background work runs, no nudge while output is fresh; nudge at ≥ `stallMinutes` of silence; activity resets the timer. Live (threshold temporarily 0.1 min): `Stall nudge #2` named the running `sleep 200` shell; `#3` named the quiet subagent; unit tests cover progress-resets-clock and silence→stall.
-- [x] The `stalled-task` text names the stalled child session ID or shell command (both live nudges).
-- [x] Foreground tools never enter stall logic (session stays `running` → `evaluate` returns early; exited/foreign shells are ignored — unit-covered).
+- [x] S5/S6: while background work runs, no nudge while output is fresh; nudge at ≥ `stallMinutes` of silence; activity resets the timer. Live (threshold temporarily 0.25 min): `Stall nudge #1` named the running shell, the subagent session, `tool subagent "Slow sleep probe"` and the open step; unit tests cover progress-resets-clock and silence→stall.
+- [x] The `stalled-task` text names the stalled child session ID, shell command and/or tool.
+- [x] Foreground tools are tracked as in-flight tool calls, so a long foreground tool (or a `task` subagent) blocks the idle nudge and only earns a stall nudge after `stallMinutes` of silence — unit + live (exited/foreign shells are ignored — unit-covered).
 
 ### Aspect 9 — Supervisor: guardrails & lifecycle (Phase 4)
 
@@ -714,7 +747,7 @@ Each aspect lists its **tasks** (checkboxes) and the **acceptance criteria** tha
 - [x] No-progress backstop (`maxNoProgressNudges`) with a single transition log + event — implemented + unit-tested (exactly N identical nudges → pause → list change resumes); live `noProgress` increments observed in nudges #2/#3
 - [x] Per-session `setEnabled` flag — supervisor method + `evaluate` gate (`enabled=false` → paused until toggled); RPC wiring lands in aspect 11
 - [x] `dispose()`: clear all timers, abort the subscription — implemented (abort-aware loop, idempotent guard) + unit-tested; observed disposing on every reload wave
-- [x] Busy-state guardrails (§12.18, user-reported): one "quiet clock" (session + running children + tracked shells) gates both the settle and stall windows in `evaluate()`, and `sendNudge()` re-validates `enabled`/`paused`/`blocked`/`running` + the threshold at send time (retries included) — unit-tested + live (`skipped (recent activity (1276ms < settleMs 5000ms))`, `skipped (work quiet 2.5s < 5min)`, no nudges during continuous work)
+- [x] Busy-state guardrails (§12.18 → superseded by the activity-span model in §12.19): nothing is nudged while a turn/step/reasoning/tool span, an in-flight tool call, a shell, a child or a queued inbox item is open, and `sendNudge()` re-validates `enabled`/`paused`/`blocked` and the quiet threshold at send time (retries included) — unit-tested + live (stall nudge named subagent + shell + tool + open step; zero idle nudges during continuous work)
 
 **Acceptance criteria**
 - [x] S7: an interrupt pauses supervision; the next real user prompt resumes it — unit-proven; live check deferred (needs a real interrupt mid-turn).
@@ -737,12 +770,13 @@ Each aspect lists its **tasks** (checkboxes) and the **acceptance criteria** tha
 ### Aspect 11 — RPC (Phase 6)
 
 **Tasks**
-- [x] `src/rpc.ts` contract: methods `list/clear/nudge/setEnabled/subscribe/unsubscribe`; events `updated/nudged` (portable JSON-schema descriptors)
+- [x] `src/rpc.ts` contract: methods `list/clear/nudge/setEnabled/toggle/toggleFile/subscribe/unsubscribe`; events `updated/nudged` (portable JSON-schema descriptors)
 - [x] `ctx.rpc.register` + implementations; emit on every mutation, subscription change, and nudge; dispose on unload — live: registered in all four instances (19:36:52)
+- [x] `toggleFile({sessionID, path, line})` for markdown write-back (§12.20): fence-aware marker rewrite, refuses paths outside the effective subscription set — live round-trip (`- [ ]`→`- [x]`, `- [~]`→`- [x]`; fenced + unsubscribed rejected)
 
 **Acceptance criteria**
-- [x] Methods are callable from the TUI (aspect 12) and over HTTP — live spot checks: `todo.list` (items + supervisor snapshot), `todo.subscribe`, `todo.setEnabled` via `POST /api/rpc/todo/{method}` with the `{"input": …}` envelope (§12.15).
-- [x] `updated` fires on `todo_write`/`clear`; `nudged` fires exactly once per nudge — all emissions go through one emitter (tools hook, clear/subscribe handlers, supervisor nudge success); unit tests assert emission (`machine.test.ts`, `rpc.test.ts`).
+- [x] Methods are callable from the TUI (aspect 12) and over HTTP — live spot checks: `todo.list` (items + supervisor snapshot), `todo.subscribe`, `todo.setEnabled`, `todo.toggleFile` via `POST /api/rpc/todo/{method}` with the `{"input": …}` envelope (§12.15, §12.20).
+- [x] `updated` fires on `todo_write`/`clear`/`toggle`/`toggleFile`; `nudged` fires exactly once per nudge — all emissions go through one emitter (tools hook, clear/subscribe handlers, supervisor nudge success); unit tests assert emission (`machine.test.ts`, `rpc.test.ts`).
 - [x] `subscribe`/`unsubscribe` validate paths (extension + resolution) and round-trip in storage — unit-tested (resolve, dedupe, un-shadow, shadow; rejects `.txt`); `list.files` becomes real data in aspect 14.
 - [ ] After plugin unload, calls fail cleanly (registration disposed) rather than hanging — deferred to the interactive scenario pass (needs a plugin-disable cycle, S14).
 
@@ -751,12 +785,13 @@ Each aspect lists its **tasks** (checkboxes) and the **acceptance criteria** tha
 **Tasks**
 - [x] `src/tui.tsx`: RPC client + memory-store snapshots refreshed from `updated`/`nudged` events — live: loads and registers (`[todo-supervisor/tui] setup 2.0.24` → `slots registered` → `ready`, 19:48:59) with hot-reload `disposed`→`setup` cycles (§12.16)
 - [x] Composer strip (`session.composer.top`; hidden when both sources are empty) with combined session + file counts
-- [x] Panel (`session.panel`, name `todo.todos`): session section + markdown file sections (`path:line` rows when items carry `line`); actions: up/down, `x` toggle (RPC `toggle`), `n` nudge now, `c` clear (confirm dialog), `r` refresh, `a` add file, `d` remove file, `f` fullscreen, `escape` close
-- [x] Commands: palette + `/todos` slash with arguments (`add <path>`, `remove <path>`; default opens the panel); toasts on nudge and on all-done
+- [x] Panel (`session.panel`, name `todo.todos`), rewritten (§12.21): header with progress bar + supervision chip, `<scrollbox>` body with a `SESSION` section and collapsible markdown sections (`path:line`, `(missing)` badge, selection highlight kept on screen via `scrollChildIntoView`), width-aware footer; keys `↑↓/jk`, `pgup/pgdn`, `home/end/g/G`, `space`/`x` toggle (session item → RPC `toggle`, markdown item → RPC `toggleFile`, file row → collapse), `enter` collapse, `n` nudge, `s` pause/resume, `a` add, `d` remove, `r` refresh, `/` filter, `f` fullscreen, `c` clear, `?` help, `escape` close
+- [x] Layout math extracted to `src/panel.ts` + `src/panel.test.ts` (12 tests) so the TUI file is JSX-only
+- [x] Commands: palette + `/todos` slash with arguments (`add <path>`, `remove <path>`; default opens the panel); toasts on nudge (idle vs stalled) and on all-done
 
 **Acceptance criteria**
 - [x] S13: strip counts match server state and update within a moment of `todo_write` — the strip refreshes on RPC `updated` (emitted by the todo_write hook); visual confirmation in the scenario pass.
-- [x] Panel actions (nudge now, clear, toggle done) change server state and reflect back in the UI — `toggle` live round-trip (completed → pending → completed, 19:49); every action emits `updated` → refresh.
+- [x] Panel actions (nudge now, clear, toggle done, toggle file item) change server state and reflect back in the UI — `toggle` live round-trip (completed → pending → completed, 19:49) and `toggleFile` live round-trip (20:28, §12.20); every action emits `updated` → refresh.
 - [x] `/todos add <path>` subscribes the active session to that file — command wired to RPC `subscribe` (live-verified over HTTP) with a success toast; file sections render `list.files` (parsed items land with aspect 14).
 - [x] Toast appears when a nudge fires for the active session; "all done" toast on completion — wired to RPC `nudged` + the open-count transition in the snapshot store.
 - [x] No list and no subscriptions → strip hidden; disabling the plugin removes all UI contributions — slot disposers + event unsubscribes in the setup cleanup; live: `disposed` on hot reload.
@@ -785,6 +820,7 @@ Depends on aspects 4–5 (storage, tools); task lines here extend aspects 11–1
 - [x] `ctx.tool.hook("execute.after")` refresh for `edit`/`write`/`patch` on subscribed paths; emit RPC `updated` — live: `markdown refreshed (ses_…, /tmp/opencode/live-todo.md)` after a real edit call
 - [x] RPC `subscribe`/`unsubscribe`; `list` output adds `files` (path, exists, items) — live: 76 parsed PLAN.md items with status + line
 - [x] TUI file sections + add/remove file actions + `/todos add|remove <path>` arguments (aspect 12 extensions)
+- [x] Panel write-back: `x` on a markdown row calls RPC `toggleFile`, which rewrites the checkbox in the file (§12.20) — live round-trip; parser also tolerates a CRLF last line without a final newline
 
 **Acceptance criteria**
 - [x] S15 passes: file items appear with `path:line` refs in `todo_read` and nudges; supervision continues until the file's last item is `[x]`, then stops — live (nudge above) + unit test ("markdown completion stops nudges and new items resume them").
@@ -831,4 +867,7 @@ Authoritative catalog: `node_modules/@opencode/schema/dist/event-manifest.js` (+
 15. **RPC over HTTP**: route `POST /api/rpc/{rpcID}/{method}` (OpenAPI `rpc.call`); the body is the wrapped envelope `{"input": <method input>}` and the response is `{"output": …}` — a bare payload fails with `rpc.invalid_input`, and a handler payload containing `undefined` fails with `rpc.invalid_output` (fix: `pauseReason: st.pauseReason ?? null`). Unauthenticated HTTP is rejected; the `opencode2 api` CLI carries service credentials. Live spot checks: `todo.list`, `todo.subscribe`, `todo.setEnabled`; an unknown `rpcID` fails cleanly (`rpc.method_not_found`).
 16. **TUI plugin loading**: the `./tui` export may point at a **`.tsx`** entry; the host transpiles plugin files outside `node_modules` and rewrites `@opentui/solid`(+`/jsx-runtime`), `solid-js`(+`/store`) and `@opencode/plugin/tui` to its own module instances (virtual modules) — no local OpenTUI install required (optional peers in `package.json`; the `@jsxImportSource @opentui/solid` pragma is respected). Live: `[todo-supervisor/tui] setup 2.0.24` → `slots registered (session.composer.top, session.panel todo.todos)` → `ready`, and hot reloads cycle through `disposed`→`setup`. TUI-side logging must not touch stdout/stderr (the TUI owns the terminal): `logFile` (file-only variant of `log`) writes the shared log; `context.client.rpc(TodoRpc)` + `rpc.events.on(...)` reach the server RPC out of the box.
 17. **Subscription reads can lag briefly across roles**: right after a `todo_subscribe` write from one role, a `todo_read` in another role can still report the old subscription set for ~1–2 s (observed once; an immediate retry showed the file). RPC `list`, the supervisor's `evaluate()`/`sendNudge()` and the `execute.after` hook all re-read per call, so supervision and the UI are unaffected; the same class as the §12.13 stale-cache finding (SQLite `kv` visibility between roles).
-18. **Busy-state misfires (user-reported live, fixed)**: `session.execution.*` fires per *step*, so a session could read `idle` while the model was still thinking/streaming — scheduled evaluations never checked freshness for a known `idle` status, so nudges arrived mid-turn, while background shells/subagents were producing output, and even in flight after `setEnabled(false)`. Fix: a single "quiet clock" (`quietMs()` = milliseconds since the newest activity across the session, its running children and its tracked shells) gates both the settle window and the stall window in `evaluate()`, and `sendNudge()` re-validates `enabled`/`paused`/`blocked`/`running` plus the quiet threshold at send time (retries included; manual nudges bypass only the quiet/busy checks, and stay blocked while disabled). Live after the fix: `evaluate … skipped (recent activity (1276ms < settleMs 5000ms))`, `skipped (work quiet 2.5s < 5min)`, and zero nudges while the agent worked continuously for minutes.
+18. **Busy-state misfires (user-reported live, fixed)**: a session could be nudged while it was not idle. First fix (that entry's original text) used a single "quiet clock" plus send-time re-validation; it was still fooled by a **running `task` tool** because nothing tracked in-flight tool calls. Superseded by §12.19.
+19. **Activity-span idle model (user-reported: "triggering when a task is running in the main context")**: the runtime here does **not** reliably deliver `session.status`/`session.idle` (0 in a long capture), so `status` alone can never prove idleness; the authoritative signals are the paired lifecycle events. Implemented: per-session **spans** (`turn`, `step`, `reasoning`, `text`, `tool-input`, `inbox`) plus **in-flight tool calls** (registered from `session.tool.input.started`, which carries `name`, enriched by `session.tool.called`'s `input.description`/`input.command`; closed by `session.tool.success/failed`). `session.step.ended` carries `finish`: **`"stop"` = final step of the turn**, `"tool-calls"` = the turn continues and must never arm a nudge. `endTurn()` (from `finish:"stop"`, `execution.succeeded/failed/interrupted`, `status idle`) closes all spans, drops tool calls and records `terminalAt`, which is what heals lost close events (interrupt, reload mid-call). `evaluate()` nudges on idleness only when nothing is open **and** `terminalAt` exists (otherwise it waits the stall window), and the stall branch names every open kind. Verified live with a lowered 15 s threshold: `evaluate … skipped (work quiet 3.6s < 0.25min)` while a `sleep 90` shell and a subagent ran, `register ses_ebec… (parent=ses_ebf…)` (child sessions **do** register live — an earlier "no `session.created`" reading was a log-window artifact), then exactly one nudge: `Stall nudge #1 — no activity for less than a minute from: subagent ses_ebec… / background shell "sleep 90…" / tool subagent "Slow sleep probe" / open step (stall threshold 0.25 min)`; zero idle nudges during the work. Unit tests: in-flight task blocks the nudge, `tool-calls` never arms, `stop` arms, reasoning-only turn, stall names the tool, leak healing (101/101).
+20. **Markdown write-back (`RPC toggleFile`)**: the panel can check items off in subscribed files. `toggleMarkdownItem(path, line)` is fence-aware (only lines the parser reports as items), rewrites **only** the marker (bullet, indentation, trailing text and CRLF endings preserved) and writes via temp file + `renameSync`; the RPC refuses paths outside the effective subscription set. Live round-trip over HTTP: `- [ ] first live item` → `- [x] first live item`, `- [~] canceled one` → `- [x] canceled one`; a fenced look-alike and an unsubscribed path both failed with logged reasons. This also fixed a parser edge: a CRLF file whose last line has no final newline is now parseable (`ITEM_RE` tolerates a trailing `\r`).
+21. **Panel rewrite + nudge label**: `src/tui.tsx` now renders a header (progress bar + supervision chip from the new `snapshot()` fields `runningTools`/`spans`/`quietMs`/`terminal`), a `<scrollbox>` body with a `SESSION` section plus collapsible per-file sections (selection highlight, `:line` refs, `(missing)` badge), and a width-aware footer; keys are a keymap layer enabled only while `panel.focused`. All layout math moved to `src/panel.ts` (12 unit tests). The synthetic bubble label was enriched from `description: "todo-supervisor"` to `describeNudge()` (`todo-supervisor · nudge #3`, `todo-supervisor · stalled: task "…"`), since that string is the only text the host renders next to `◈`.
