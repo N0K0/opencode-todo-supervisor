@@ -1,6 +1,6 @@
 // todo-supervisor — RPC contract + handler unit tests (aspect 11).
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import type { Plugin } from "@opencode/plugin"
 import { MarkdownCache } from "./markdown"
 import { DEFAULTS, type Options } from "./options"
@@ -87,6 +87,7 @@ describe("RPC contract (§5.6)", () => {
       "setEnabled",
       "subscribe",
       "toggle",
+      "toggleFile",
       "unsubscribe",
     ])
     expect(Object.keys(TodoRpc.events).sort()).toEqual(["nudged", "updated"])
@@ -146,6 +147,27 @@ describe("RPC contract (§5.6)", () => {
     expect(w.calls.filter((call) => call === "changed s1").length).toBe(2)
     expect(w.emitted.filter((event) => event.name === "updated").length).toBe(2)
     await expect(w.handlers.toggle!({ sessionID: "s1", index: 9 })).rejects.toThrow(/range/)
+  })
+
+  test("toggleFile rewrites a subscribed file, refuses other paths and notifies", async () => {
+    const dir = "/tmp/opencode"
+    mkdirSync(dir, { recursive: true })
+    const file = `${dir}/rpc-toggle-${process.pid}.md`
+    const other = `${dir}/rpc-toggle-other-${process.pid}.md`
+    writeFileSync(file, "- [ ] one\n- [x] two\n")
+    writeFileSync(other, "- [ ] not subscribed\n")
+    const w = await setup([], dir)
+    await w.handlers.subscribe!({ sessionID: "s1", path: file })
+
+    const toggled = (await w.handlers.toggleFile!({ sessionID: "s1", path: file, line: 1 })) as Record<string, unknown>
+    expect(toggled.state).toBe("completed")
+    expect(readFileSync(file, "utf8")).toContain("- [x] one")
+    await w.handlers.toggleFile!({ sessionID: "s1", path: file, line: 2 })
+    expect(readFileSync(file, "utf8")).toContain("- [ ] two")
+    expect(w.calls.filter((call) => call === "changed s1").length).toBe(2)
+    expect(w.emitted.filter((event) => event.name === "updated").length).toBe(3) // subscribe + 2 toggles
+    await expect(w.handlers.toggleFile!({ sessionID: "s1", path: other, line: 1 })).rejects.toThrow(/not a subscribed/)
+    await expect(w.handlers.toggleFile!({ sessionID: "s1", path: file, line: 9 })).rejects.toThrow(/no checklist item/)
   })
 
   test("list reports subscribed files with their existence", async () => {

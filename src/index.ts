@@ -91,7 +91,7 @@ export default Plugin.define({
       })
       rpcRegistration = reg
       rpcEmit = (name, payload) => reg.emit(name, payload)
-      instanceLog("rpc registered (todo.list/clear/nudge/setEnabled/toggle/subscribe/unsubscribe)")
+      instanceLog("rpc registered (todo.list/clear/nudge/setEnabled/toggle/toggleFile/subscribe/unsubscribe)")
     } catch (err) {
       instanceLog(`rpc registration failed: ${String(err)}`)
     }

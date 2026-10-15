@@ -8,7 +8,7 @@
 // carry effect schemas), so handlers validate their input explicitly.
 import type { Plugin } from "@opencode/plugin"
 import { Rpc } from "@opencode/plugin/rpc"
-import { effectiveFiles, MarkdownCache, resolveMarkdownPath } from "./markdown"
+import { effectiveFiles, MarkdownCache, resolveMarkdownPath, toggleMarkdownItem } from "./markdown"
 import type { Options } from "./options"
 import type { TodoStore } from "./storage"
 import type { Supervisor } from "./supervisor"
@@ -57,6 +57,16 @@ export const TodoRpc = Rpc.define({
         type: "object",
         properties: { sessionID: { type: "string" }, index: { type: "number" } },
         required: ["sessionID", "index"],
+        additionalProperties: false,
+      } as const,
+      output: objectOutput,
+    },
+    /** Toggle a checklist item inside a subscribed markdown file (§5.8, panel `x`). */
+    toggleFile: {
+      input: {
+        type: "object",
+        properties: { sessionID: { type: "string" }, path: { type: "string" }, line: { type: "number" } },
+        required: ["sessionID", "path", "line"],
         additionalProperties: false,
       } as const,
       output: objectOutput,
@@ -219,6 +229,23 @@ export async function registerTodoRpc(ctx: Plugin.Context, deps: RpcDeps): Promi
       await emitEvent("updated", { sessionID })
       log(`rpc toggle (${sessionID}) index=${index} → ${status}`)
       return { sessionID, index, status }
+    },
+    toggleFile: async (raw) => {
+      const input = requireObject(raw)
+      const sessionID = requireString(input.sessionID, "sessionID")
+      const line = requireNumber(input.line, "line")
+      if (line < 1) throw new Error(`invalid input: "line" must be a positive line number`)
+      const path = resolveMarkdownPath(deps.directory, requireString(input.path, "path"))
+      // Only files that are actually supervised may be edited (§5.8); arbitrary
+      // paths are rejected so the panel cannot write anywhere on disk.
+      const subscribed = effectiveFiles(deps.options, deps.directory, await store.loadSubs(sessionID))
+      if (!subscribed.includes(path)) throw new Error(`invalid input: "${path}" is not a subscribed markdown file`)
+      const state = toggleMarkdownItem(path, line)
+      deps.markdown.invalidate(path)
+      supervisor.notifyTodosChanged(sessionID)
+      await emitEvent("updated", { sessionID })
+      log(`rpc toggleFile (${sessionID}) ${path}:${line} → ${state}`)
+      return { sessionID, path, line, state }
     },
     subscribe: async (raw) => {
       const input = requireObject(raw)

@@ -1,6 +1,6 @@
 // todo-supervisor — markdown mode unit tests (§5.8, aspect 14a).
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import {
   displayPath,
   effectiveFiles,
@@ -9,6 +9,7 @@ import {
   parseChecklist,
   renderFileSection,
   resolveMarkdownPath,
+  toggleMarkdownItem,
 } from "./markdown"
 
 describe("markdown parser (§5.8)", () => {
@@ -88,6 +89,28 @@ describe("markdown cache + renderer", () => {
     const missing = cache.parse(`${dir}/missing-${process.pid}.md`)
     expect(missing.exists).toBe(false)
     expect(missing.items).toEqual([])
+  })
+
+  test("toggles a checklist item in place, fence-aware and format-preserving", () => {
+    const dir = "/tmp/opencode"
+    mkdirSync(dir, { recursive: true })
+    const file = `${dir}/md-toggle-${process.pid}.md`
+    writeFileSync(
+      file,
+      ["# List", "  - [ ] nested item  ", "```md", "- [ ] fenced", "```", "1) [x] done\r"].join("\r\n"),
+    )
+    // open -> completed, indentation/bullet/trailing spaces preserved
+    expect(toggleMarkdownItem(file, 2)).toBe("completed")
+    expect(readFileSync(file, "utf8")).toContain("  - [x] nested item  ")
+    // completed -> open
+    expect(toggleMarkdownItem(file, 6)).toBe("open")
+    expect(readFileSync(file, "utf8")).toContain("1) [ ] done")
+    // CRLF line endings survive the rewrite
+    expect(readFileSync(file, "utf8").split("\n").length).toBe(6)
+    // a fenced look-alike is not an item
+    expect(() => toggleMarkdownItem(file, 4)).toThrow(/no checklist item/)
+    // a plain line is not an item either
+    expect(() => toggleMarkdownItem(file, 1)).toThrow(/no checklist item/)
   })
 
   test("renders path:line sections and open items", () => {

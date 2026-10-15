@@ -4,7 +4,7 @@
 // items act as todos. This module owns: the fence-aware parser, path
 // resolution/validation, the effective-subscription merge, a per-file parse
 // cache and the shared renderer for `path:line` sections.
-import { readFileSync, statSync } from "node:fs"
+import { readFileSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { isAbsolute, relative, resolve as resolvePath } from "node:path"
 
 export type MarkdownState = "open" | "completed" | "canceled"
@@ -25,8 +25,9 @@ export type ParsedFile = {
   items: MarkdownItem[]
 }
 
-// GFM checkbox: any bullet or ordered marker, any indentation (§5.8).
-const ITEM_RE = /^(\s*)(?:[-*+]|\d+[.)])\s+\[( |x|X|~)\]\s+(.*)$/
+// GFM checkbox: any bullet or ordered marker, any indentation (§5.8). The trailing
+// `\r?` keeps a CRLF file whose last line has no final newline parseable.
+const ITEM_RE = /^(\s*)(?:[-*+]|\d+[.)])\s+\[( |x|X|~)\]\s+(.*?)\r?$/
 const FENCE_RE = /^\s*(`{3,}|~{3,})/
 
 /** Fence-aware checklist parse; code fences are skipped (§5.8). */
@@ -108,6 +109,32 @@ export class MarkdownCache {
 /** Open markdown items across the given files. */
 export function openMarkdownItems(files: readonly ParsedFile[]): MarkdownItem[] {
   return files.flatMap((file) => file.items.filter((item) => item.state === "open"))
+}
+
+/**
+ * Toggle one checklist item in place (§5.8 panel write-back). Only lines the
+ * fence-aware parser reports as items are eligible, and only the marker is
+ * rewritten — bullet, indentation, trailing text and the file's line endings are
+ * preserved. Writes via a temp file + rename so a crash cannot truncate the file.
+ * Callers invalidate the parse cache. Returns the new state.
+ */
+export function toggleMarkdownItem(path: string, line: number): MarkdownState {
+  const content = readFileSync(path, "utf8")
+  const item = parseChecklist(content, path).find((entry) => entry.line === line)
+  if (!item) throw new Error(`no checklist item at ${path}:${line} (fenced or missing?)`)
+  const next: MarkdownState = item.state === "completed" ? "open" : "completed"
+  const marker = next === "completed" ? "x" : next === "canceled" ? "~" : " "
+  const lines = content.split("\n")
+  const index = line - 1
+  const target = lines[index]
+  if (target === undefined) throw new Error(`no line ${line} in ${path}`)
+  const rewritten = target.replace(/\[( |x|X|~)\]/, `[${marker}]`)
+  if (rewritten === target) throw new Error(`could not rewrite the checklist marker at ${path}:${line}`)
+  lines[index] = rewritten
+  const tmp = `${path}.todo-supervisor.tmp`
+  writeFileSync(tmp, lines.join("\n"), "utf8")
+  renameSync(tmp, path)
+  return next
 }
 
 /** Path for display: relative to the location directory when inside it. */
