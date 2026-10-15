@@ -35,6 +35,7 @@ Tested against OpenCode `2.0.24`.
 
 - The package directory needs its dependencies once: `bun install` (the loader does not install them for local-path entries).
 - Config content changes and plugin source edits are hot-reloaded by the running service.
+- Published as `opencode-todo-supervisor` on npm: `opencode plugin add opencode-todo-supervisor` (this also loads the bundled TUI entry).
 - Logs: the plugin appends to `~/.local/share/opencode/log/todo-supervisor.log` (log lines are prefixed `[todo-supervisor]` / `[todo-supervisor/tui]`). `console.log` inside plugins is swallowed; use the log file.
 
 ## Tools
