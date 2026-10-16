@@ -1,13 +1,8 @@
 # todo-supervisor
 
 An [OpenCode](https://opencode.ai) **V2** plugin that gives every session a real
-todo list — and then keeps the agent working on it.
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  📋 ███░░░░░ 8/17 open                                                    │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+todo list — and then keeps the agent working on it. A live progress strip in the
+composer (`📋 ███░░░░░ 8/17 open`) tracks the list.
 
 - `todo_write` / `todo_read` tools (V2 ships none), stored per session;
 - a **supervisor** that re-prompts an idle session while its list still has open
@@ -160,25 +155,10 @@ The body/response are wrapped in `{ "input": … }` / `{ "output": … }`.
 
 ## How it works
 
-One server plugin instance per OpenCode location. It wires four things together
-and then gets out of the way:
-
-```
-        OpenCode V2 service
-        ┌──────────────────────────────────────────────────────────────┐
-        │  ctx.event.subscribe() ──▶ supervisor state machine ──▶ nudge │
-        │        ▲                    (activity spans, evaluate)   │    │
-        │        │                                                 ▼    │
-        │  session.tool.* / text / reasoning / step   ctx.session.      │
-        │        │                                    synthetic()        │
-        │  todo_write / todo_read ──▶ ctx.storage (todos/, subs/)       │
-        │        │                                                      │
-        │  session.hook("context") ──▶ system block (list + policy)     │
-        │                                                               │
-        └───────────────────────────┬───────────────────────────────────┘
-                                    │ RPC (methods + events)
-                          TUI plugin: strip · popover · commands · toasts
-```
+One server plugin instance runs per OpenCode location. It registers the todo
+tools, subscribes to the session event stream to supervise activity, injects the
+current list into each model request, and exposes an RPC contract that the TUI
+reads.
 
 ### Event-driven supervision
 
@@ -257,11 +237,11 @@ is summarized away, the list is re-injected on the next request.
 
 A thin wrapper over `ctx.storage` (durable JSON scoped to the plugin):
 
-```
-todos/<sessionID>   { version, sessionID, items[], updatedAt }
-subs/<sessionID>    { version, sessionID, files[], removed[], updatedAt }
-claims/<sessionID>  { tag, at }        # hot-reload ownership
-```
+| Key | Value |
+| --- | --- |
+| `todos/<sessionID>` | `{ version, sessionID, items[], updatedAt }` |
+| `subs/<sessionID>` | `{ version, sessionID, files[], removed[], updatedAt }` |
+| `claims/<sessionID>` | `{ tag, at }` — hot-reload ownership |
 
 On startup the plugin scans `todos/` and reconciles against `ctx.session.get()`
 (session gone → drop the entry; session alive → register and evaluate once).
@@ -295,16 +275,6 @@ There is no filesystem watcher. Instead:
 - Tests: `bun test` (106 tests across parser, storage, tools, RPC, state machine,
   panel helpers).
 - Watch logs: `tail -f ~/.local/share/opencode/log/todo-supervisor.log`.
-
-```
-src/index.ts        server plugin entry (setup, event loop, RPC/tool/hook wiring)
-src/supervisor.ts   state machine (activity spans, registry, evaluate, nudges, claims)
-src/tools.ts        todo_write/read/subscribe/unsubscribe + renderers + context hook
-src/markdown.ts     fence-aware checklist parser, subscriptions, parse cache, write-back
-src/rpc.ts          RPC contract + handlers
-src/panel.ts        pure panel helpers (rows, progress, cursor, hints) — unit-tested
-src/tui.tsx         TUI plugin (strip, panel, commands, toasts)
-```
 
 ## Limitations
 
