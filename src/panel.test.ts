@@ -10,7 +10,9 @@ import {
   isSelectable,
   itemColumns,
   moveCursor,
+  panelKeys,
   popoverBodyHeight,
+  popoverKeys,
   priorityTag,
   progressBar,
   quietLabel,
@@ -198,6 +200,26 @@ describe("panel cursor", () => {
     expect(dialogWidth("xlarge", 80)).toBe(78)
     // Never wider than the window (minus the host card's 2-cell inset).
     expect(dialogWidth("xlarge", 20)).toBe(20)
+  })
+
+  test("the panel layer yields to overlays that own the keyboard", () => {
+    // Normal session view: live while focused.
+    expect(panelKeys(true, "base")).toBe(true)
+    expect(panelKeys(false, "base")).toBe(false)
+    // The model picker, confirmations and other dialogs run in `modal`.
+    expect(panelKeys(true, "modal")).toBe(false)
+    expect(panelKeys(true, "menu")).toBe(false)
+    expect(panelKeys(true, "autocomplete")).toBe(false)
+    // An unknown mode is not treated as an overlay.
+    expect(panelKeys(true, "composer")).toBe(true)
+  })
+
+  test("the popover keeps the keyboard in its own dialog", () => {
+    expect(popoverKeys("modal")).toBe(true)
+    expect(popoverKeys("base")).toBe(true)
+    expect(popoverKeys("composer")).toBe(true)
+    expect(popoverKeys("menu")).toBe(false)
+    expect(popoverKeys("autocomplete")).toBe(false)
   })
 
   test("id and priority tags and their column widths", () => {

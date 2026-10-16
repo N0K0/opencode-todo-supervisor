@@ -26,7 +26,9 @@ import {
   idTag,
   itemColumns,
   moveCursor,
+  panelKeys,
   popoverBodyHeight,
+  popoverKeys,
   priorityTag,
   progressBar,
   rowIndex,
@@ -625,7 +627,7 @@ export default Plugin.define({
         return (
           <TodoList
             sessionID={props.sessionID}
-            active={() => true}
+            active={() => popoverKeys(context.keymap.mode.current())}
             width={() => dialogWidth(size(), viewportWidth())}
             height={() => popoverBodyHeight(viewportHeight())}
             close={() => context.ui.dialog.clear()}
@@ -660,7 +662,7 @@ export default Plugin.define({
           <Show when={panel.name === "todo.todos"}>
             <TodoList
               sessionID={panel.sessionID}
-              active={() => panel.focused}
+              active={() => panelKeys(panel.focused, context.keymap.mode.current())}
               width={() => panel.width}
               close={() => panel.close()}
               cycleSize={() => panel.toggleFullscreen()}

@@ -322,3 +322,29 @@ const DIALOG_WIDTH: Record<DialogSizeName, number> = { medium: 60, large: 88, xl
 export function dialogWidth(size: DialogSizeName, viewportWidth: number): number {
   return Math.min(DIALOG_WIDTH[size], Math.max(20, viewportWidth - 2))
 }
+
+/**
+ * Keymap modes that own the keyboard while they are up: `modal` (dialogs, the
+ * model picker, confirmations), `menu` (the command/palette menus) and
+ * `autocomplete` (the prompt's completion list). They all drive themselves with
+ * the arrow keys.
+ */
+const OVERLAY_MODES: ReadonlySet<string> = new Set(["modal", "menu", "autocomplete"])
+
+/**
+ * Whether the side panel's keys should be live. The layer binds the arrows
+ * globally at a high priority, so it must yield the moment an overlay opens —
+ * otherwise a focused docked panel swallows the model picker's up/down.
+ */
+export function panelKeys(focused: boolean, mode: string): boolean {
+  return focused && !OVERLAY_MODES.has(mode)
+}
+
+/**
+ * Whether the popover's keys should be live. The popover *is* a dialog, so
+ * `modal` is ours; only the non-dialog overlays (palette, completion list) take
+ * the keyboard away from it.
+ */
+export function popoverKeys(mode: string): boolean {
+  return mode !== "menu" && mode !== "autocomplete"
+}

@@ -23,7 +23,7 @@ Tested against OpenCode `2.0.24`.
 ## Install
 
 ```sh
-opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.7
+opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.8
 ```
 
 This also loads the bundled TUI entry. To pass options, use the object form:
@@ -197,7 +197,10 @@ effective set is `config.markdownFiles ∪ stored files − removed` per session
   - it re-reads every 3 s while open, so edits made outside OpenCode show up
     without waiting for an event.
 - **Side panel** (palette "Todo: open side panel"): the same list docked to
-  `session.panel` (`todo.todos`), with `f` for fullscreen.
+  `session.panel` (`todo.todos`), with `f` for fullscreen. Its keys are live only
+  while the panel is focused *and* no overlay is up (dialog, menu, completion
+  list), so a docked panel never steals the arrow keys from the model picker,
+  command palette or the prompt's completions.
 - `/todos add <path>` and `/todos remove <path>` manage subscriptions from the
   prompt.
 - **Toasts** on `nudged` (idle vs stalled wording) and on the all-done transition.
