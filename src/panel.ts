@@ -306,15 +306,15 @@ export function popoverBodyHeight(viewportHeight: number, extraRows = 0): number
 
 export type DialogSizeName = "medium" | "large" | "xlarge"
 
-const DIALOG_FACTOR: Record<DialogSizeName, number> = { medium: 0.6, large: 0.8, xlarge: 0.95 }
+const DIALOG_FACTOR: Record<DialogSizeName, number> = { medium: 0.7, large: 0.9, xlarge: 0.98 }
 
 /**
  * Content width for the popover dialog, as a fraction of the terminal width so
- * it scales with the window (`medium` 60%, `large` 80%, `xlarge` 95%), clamped
+ * it scales with the window (`medium` 70%, `large` 90%, `xlarge` 98%), clamped
  * for small terminals and capped so it never spans an ultrawide screen.
  */
 export function dialogWidth(size: DialogSizeName, viewportWidth: number): number {
   const total = Math.max(40, viewportWidth)
   const target = Math.round(total * DIALOG_FACTOR[size])
-  return Math.max(36, Math.min(target, total - 4, 180))
+  return Math.max(36, Math.min(target, total - 4, 200))
 }

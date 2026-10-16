@@ -23,7 +23,7 @@ Tested against OpenCode `2.0.24`.
 ## Install
 
 ```sh
-opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.5
+opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.6
 ```
 
 This also loads the bundled TUI entry. To pass options, use the object form:
@@ -178,7 +178,8 @@ effective set is `config.markdownFiles ∪ stored files − removed` per session
   Its body and width scale with the terminal (up to 48 rows / a share of the
   window), so the key legend stays visible on a short terminal and a tall one
   shows more rows; the header shows `open/total` and the selected `row n/m`. `f`
-  cycles the dialog size (medium → large → xlarge), `esc` closes it.
+  cycles the dialog size — medium (70%), large (90%), xlarge (98% of the
+  terminal width, capped at 200 cells) — and `esc` closes it.
   - header: progress bar, `open/total`, and a supervision chip (`idle · quiet
     12s · nudges 2`, `working: 1 tool · 1 shell · quiet 4s`, `paused
     (no-progress)`, `not supervised`);

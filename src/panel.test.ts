@@ -190,15 +190,15 @@ describe("panel cursor", () => {
   })
 
   test("popover width follows the dialog size and clamps", () => {
-    expect(dialogWidth("medium", 200)).toBe(120)
-    expect(dialogWidth("large", 200)).toBe(160)
-    expect(dialogWidth("xlarge", 200)).toBe(180)
-    expect(dialogWidth("medium", 80)).toBe(48)
-    expect(dialogWidth("large", 80)).toBe(64)
+    expect(dialogWidth("medium", 200)).toBe(140)
+    expect(dialogWidth("large", 200)).toBe(180)
+    expect(dialogWidth("xlarge", 200)).toBe(196)
+    expect(dialogWidth("medium", 80)).toBe(56)
+    expect(dialogWidth("large", 80)).toBe(72)
     expect(dialogWidth("xlarge", 80)).toBe(76)
     expect(dialogWidth("xlarge", 20)).toBe(36)
     // xlarge tracks the window instead of a fixed cap.
-    expect(dialogWidth("xlarge", 120)).toBe(114)
+    expect(dialogWidth("xlarge", 120)).toBe(116)
   })
 
   test("id and priority tags and their column widths", () => {
