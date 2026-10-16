@@ -22,7 +22,7 @@ Tested against OpenCode `2.0.24`.
 ## Install
 
 ```sh
-opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.2
+opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.3
 ```
 
 This also loads the bundled TUI entry. To pass options, use the object form:
@@ -48,21 +48,19 @@ This also loads the bundled TUI entry. To pass options, use the object form:
 }
 ```
 
-### Development
-
-To run from a checkout instead, point the config at the directory and run
-`bun install` once inside it (the loader does not install dependencies for
-local-path entries). Config content and plugin source edits are hot-reloaded.
+To run from a checkout instead, point the config at the directory (run
+`bun install` once inside it; the loader does not install dependencies for
+local-path entries):
 
 ```jsonc
 {
-  "plugins": [{ "package": "/absolute/path/to/todo" }]
+  "plugins": [{ "package": "/path/to/todo" }]
 }
 ```
 
-- Logs: the plugin appends to `~/.local/share/opencode/log/todo-supervisor.log`
-  (prefixes `[todo-supervisor]` / `[todo-supervisor/tui]`). `console.log` inside
-  plugins is swallowed; use the log file.
+Logs land in `~/.local/share/opencode/log/todo-supervisor.log` (prefixes
+`[todo-supervisor]` / `[todo-supervisor/tui]`); `console.log` inside plugins is
+swallowed, so use the log file.
 
 ## What it does
 
