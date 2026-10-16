@@ -81,10 +81,13 @@ describe("RPC contract (§5.6)", () => {
   test("contract exposes all methods and events", () => {
     expect(TodoRpc.id).toBe("todo")
     expect(Object.keys(TodoRpc.methods).sort()).toEqual([
+      "addItem",
       "clear",
       "list",
       "nudge",
+      "removeItem",
       "setEnabled",
+      "setPriority",
       "subscribe",
       "toggle",
       "toggleFile",
@@ -147,6 +150,54 @@ describe("RPC contract (§5.6)", () => {
     expect(w.calls.filter((call) => call === "changed s1").length).toBe(2)
     expect(w.emitted.filter((event) => event.name === "updated").length).toBe(2)
     await expect(w.handlers.toggle!({ sessionID: "s1", index: 9 })).rejects.toThrow(/range/)
+  })
+
+  test("toggle by id finds the item and reports its id", async () => {
+    const w = await setup([
+      { id: "1", content: "one", status: "pending" },
+      { id: "2", content: "two", status: "pending" },
+    ])
+    const result = (await w.handlers.toggle!({ sessionID: "s1", id: "2" })) as Record<string, unknown>
+    expect(result).toMatchObject({ id: "2", index: 1, status: "completed" })
+    expect(w.todos.get("s1")![1]!.status).toBe("completed")
+    await expect(w.handlers.toggle!({ sessionID: "s1", id: "9" })).rejects.toThrow(/no item with id/)
+    await expect(w.handlers.toggle!({ sessionID: "s1" })).rejects.toThrow(/index/)
+  })
+
+  test("addItem appends a pending item with a fresh id and emits updated", async () => {
+    const w = await setup([{ id: "1", content: "one", status: "pending" }])
+    const result = (await w.handlers.addItem!({ sessionID: "s1", content: "  two  ", priority: "high" })) as Record<
+      string,
+      unknown
+    >
+    expect(result).toMatchObject({ id: "2", content: "two", priority: "high" })
+    expect(w.todos.get("s1")!.map((item) => [item.id, item.content, item.status, item.priority])).toEqual([
+      ["1", "one", "pending", undefined],
+      ["2", "two", "pending", "high"],
+    ])
+    expect(w.calls.filter((call) => call === "changed s1").length).toBe(1)
+    expect(w.emitted.filter((event) => event.name === "updated").length).toBe(1)
+    await expect(w.handlers.addItem!({ sessionID: "s1", content: "   " })).rejects.toThrow(/content/)
+  })
+
+  test("removeItem drops the item by id and rejects unknown ids", async () => {
+    const w = await setup([
+      { id: "1", content: "one", status: "pending" },
+      { id: "2", content: "two", status: "pending" },
+    ])
+    await w.handlers.removeItem!({ sessionID: "s1", id: "1" })
+    expect(w.todos.get("s1")!.map((item) => item.id)).toEqual(["2"])
+    await expect(w.handlers.removeItem!({ sessionID: "s1", id: "9" })).rejects.toThrow(/no item with id/)
+  })
+
+  test("setPriority sets and clears a priority", async () => {
+    const w = await setup([{ id: "1", content: "one", status: "pending" }])
+    await w.handlers.setPriority!({ sessionID: "s1", id: "1", priority: "high" })
+    expect(w.todos.get("s1")![0]!.priority).toBe("high")
+    await w.handlers.setPriority!({ sessionID: "s1", id: "1", priority: "none" })
+    expect(w.todos.get("s1")![0]!.priority).toBeUndefined()
+    await expect(w.handlers.setPriority!({ sessionID: "s1", id: "1", priority: "urgent" })).rejects.toThrow(/priority/)
+    await expect(w.handlers.setPriority!({ sessionID: "s1", id: "9", priority: "low" })).rejects.toThrow(/no item with id/)
   })
 
   test("toggleFile rewrites a subscribed file, refuses other paths and notifies", async () => {

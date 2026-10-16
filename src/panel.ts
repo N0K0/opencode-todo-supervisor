@@ -4,7 +4,7 @@
 // and truncation are unit-tested without an OpenTUI renderer. src/tui.tsx only
 // maps these rows to <text>/<box> elements.
 
-export type PanelItem = { content: string; status: string; priority?: string }
+export type PanelItem = { id?: string; content: string; status: string; priority?: string }
 export type PanelFileItem = { content: string; status: string; line?: number }
 export type PanelFile = { path: string; exists: boolean; items: PanelFileItem[] }
 
@@ -47,6 +47,7 @@ export type Row =
       kind: "item"
       key: string
       source: "session" | "file"
+      id?: string
       content: string
       status: string
       priority?: string
@@ -67,6 +68,29 @@ export function statusMark(status: string): string {
   if (status === "completed") return "[x]"
   if (status === "in_progress" || status === "canceled") return "[~]"
   return "[ ]"
+}
+
+/** `#3` for a session item (empty when the item has no id / is a file item). */
+export function idTag(id: string | undefined): string {
+  return id ? `#${id}` : ""
+}
+
+/** Short priority word for a fixed-width column: `high` / `med` / `low` / ``. */
+export function priorityTag(priority: string | undefined): string {
+  if (priority === "high") return "high"
+  if (priority === "medium") return "med"
+  if (priority === "low") return "low"
+  return ""
+}
+
+/**
+ * Width of the `#id` and priority columns for a list, so rows line up. Returns
+ * 0 for a column when no item in the list uses it (keeps narrow lists compact).
+ */
+export function itemColumns(items: readonly { id?: string; priority?: string }[]): { id: number; priority: number } {
+  const id = items.reduce((max, item) => Math.max(max, idTag(item.id).length), 0)
+  const priority = items.reduce((max, item) => Math.max(max, priorityTag(item.priority).length), 0)
+  return { id, priority }
 }
 
 export function countOpen(items: readonly { status: string }[]): number {
@@ -153,6 +177,7 @@ export function buildRows(snapshot: PanelSnapshot, options: BuildOptions = {}): 
         key: `session:${index}`,
         source: "session",
         index,
+        id: item.id,
         content: item.content,
         status: item.status,
         priority: item.priority,
@@ -249,8 +274,11 @@ export function footerHints(width: number): string[] {
     "enter collapse",
     "n nudge",
     "s pause",
-    "a add",
-    "d remove",
+    "a add task",
+    "d remove task",
+    "p priority",
+    "A add file",
+    "D remove file",
     "r refresh",
     "/ filter",
     "f size",
@@ -265,25 +293,28 @@ export function footerHints(width: number): string[] {
 
 /**
  * Rows the popover list body may occupy. The dialog hugs its content, so the
- * body must be bounded or the overlay grows to the whole screen; the cap keeps
- * it a popover and leaves room for the header and the key legend. `extraRows`
- * accounts for conditional chrome (e.g. the filter line).
+ * body must be bounded or the overlay grows to the whole screen; the budget
+ * scales with the terminal (a taller window gets a taller popover) and is
+ * capped so it stays a popover. `extraRows` accounts for conditional chrome
+ * (e.g. the filter line).
  */
 export function popoverBodyHeight(viewportHeight: number, extraRows = 0): number {
   const total = Math.max(10, viewportHeight)
-  return Math.max(4, Math.min(total - 10 - Math.max(0, extraRows), 16))
+  const cap = Math.max(8, Math.min(48, Math.floor(total * 0.7)))
+  return Math.max(4, Math.min(total - 8 - Math.max(0, extraRows), cap))
 }
 
 export type DialogSizeName = "medium" | "large" | "xlarge"
 
+const DIALOG_FACTOR: Record<DialogSizeName, number> = { medium: 0.6, large: 0.8, xlarge: 0.95 }
+
 /**
- * Content width for the popover dialog. The host owns the dialog box, so the
- * list sizes its rows from the render region instead and clamps for small
- * terminals (a wider dialog just shows more of each row).
+ * Content width for the popover dialog, as a fraction of the terminal width so
+ * it scales with the window (`medium` 60%, `large` 80%, `xlarge` 95%), clamped
+ * for small terminals and capped so it never spans an ultrawide screen.
  */
 export function dialogWidth(size: DialogSizeName, viewportWidth: number): number {
   const total = Math.max(40, viewportWidth)
-  const bySize =
-    size === "xlarge" ? total - 8 : size === "large" ? total - 16 : Math.min(72, Math.max(48, total - 24))
-  return Math.max(36, Math.min(bySize, 140))
+  const target = Math.round(total * DIALOG_FACTOR[size])
+  return Math.max(36, Math.min(target, total - 4, 180))
 }

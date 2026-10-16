@@ -23,8 +23,11 @@ import {
   countOpen,
   dialogWidth,
   footerHints,
+  idTag,
+  itemColumns,
   moveCursor,
   popoverBodyHeight,
+  priorityTag,
   progressBar,
   rowIndex,
   statusMark,
@@ -322,6 +325,68 @@ export default Plugin.define({
             notify("Unsubscribed", "success")
           })
 
+        const addTask = () =>
+          guard("add task", async () => {
+            const content = await context.ui.dialog.prompt({
+              title: "Add todo",
+              description: "Press p on the new row to set its priority.",
+              placeholder: "what needs doing?",
+            })
+            if (!content || !content.trim()) return
+            const result = (await rpc.addItem({ sessionID: sessionID(), content })) as { id?: string } | undefined
+            notify(result?.id ? `Added #${result.id}` : "Added", "success")
+          })
+
+        /** The selected row, when it is an editable session item. */
+        const selectedSessionItem = (): Extract<Row, { kind: "item" }> | undefined => {
+          const row = current()
+          return row && row.kind === "item" && row.source === "session" && row.id ? row : undefined
+        }
+
+        const removeTask = () => {
+          const row = current()
+          if (!row || row.kind !== "item") {
+            notify("Select a task first", "warning")
+            return
+          }
+          if (row.source === "file" || !row.id) {
+            notify("File items are removed by editing the file", "warning")
+            return
+          }
+          const { id, content } = row
+          guard("remove task", async () => {
+            const ok = await context.ui.dialog.confirm({
+              title: "Remove task",
+              message: `Remove #${id}: ${truncate(content, 48)}?`,
+              label: { confirm: "Remove", cancel: "Cancel" },
+            })
+            if (!ok) return
+            await rpc.removeItem({ sessionID: sessionID(), id })
+            notify(`Removed #${id}`, "success")
+          })
+        }
+
+        const cyclePriority = () => {
+          const row = selectedSessionItem()
+          if (!row || !row.id) {
+            notify("Select a task first", "warning")
+            return
+          }
+          const id = row.id
+          const next =
+            row.priority === undefined
+              ? "low"
+              : row.priority === "low"
+                ? "medium"
+                : row.priority === "medium"
+                  ? "high"
+                  : "none"
+          guard("priority", async () => {
+            await rpc.setPriority({ sessionID: sessionID(), id, priority: next })
+            notify(next === "none" ? `#${id} priority cleared` : `#${id} priority: ${next}`, "success")
+          })
+        }
+
         const pauseResume = () => {
           const paused = snap().supervisor?.paused === true
           guard("supervision", async () => {
@@ -378,8 +443,11 @@ export default Plugin.define({
                 }),
             },
             { title: "Todo: pause/resume supervision", bind: "s", run: pauseResume },
-            { title: "Todo: add markdown file", bind: "a", run: addFile },
-            { title: "Todo: remove markdown file", bind: "d", run: removeFile },
+            { title: "Todo: add task", bind: "a", run: addTask },
+            { title: "Todo: remove task", bind: "d", run: removeTask },
+            { title: "Todo: cycle priority", bind: "p", run: cyclePriority },
+            { title: "Todo: add markdown file", bind: "A", run: addFile },
+            { title: "Todo: remove markdown file", bind: "D", run: removeFile },
             {
               title: "Todo: refresh",
               bind: "r",
@@ -417,7 +485,8 @@ export default Plugin.define({
                     title: "Todo panel",
                     message:
                       "↑↓/jk move · space/x toggle · enter collapse · n nudge · s pause/resume\n" +
-                      "a add file · d remove file · r refresh · / filter · f resize · c clear · esc close",
+                      "a add task · d remove task · p priority · A add file · D remove file\n" +
+                      "r refresh · / filter · f resize · c clear · esc close",
                   })
                 }),
             },
@@ -448,17 +517,30 @@ export default Plugin.define({
           return Math.max(3, available - filtered)
         }
 
-        const barWidth = () => Math.max(6, Math.min(24, width() - 44))
+        const barWidth = () => Math.max(6, Math.min(40, Math.floor(width() * 0.25)))
+
+        // Column widths for the `#id` / priority columns, sized to the list.
+        const columns = createMemo(() => {
+          const current = snap()
+          return itemColumns([...current.items, ...current.files.flatMap((file) => file.items)])
+        })
+        const contentWidth = () =>
+          Math.max(
+            8,
+            width() -
+              6 -
+              (columns().id > 0 ? columns().id + 2 : 0) -
+              (columns().priority > 0 ? columns().priority + 2 : 0),
+          )
 
         const renderRow = (row: Row) => {
           const isCurrent = () => row.key === cursor()
           const prefix = () => (isCurrent() ? "❯ " : "  ")
-          const contentWidth = () => Math.max(8, width() - 6)
           const background = () => (isCurrent() ? selectedBg() : undefined)
           if (row.kind === "section") {
             return (
               <text fg={muted()}>
-                {prefix() + truncate(row.label + (row.detail ? "  ·  " + row.detail : ""), contentWidth())}
+                {prefix() + truncate(row.label + (row.detail ? "  ·  " + row.detail : ""), width() - 6)}
               </text>
             )
           }
@@ -468,17 +550,20 @@ export default Plugin.define({
             return (
               <box backgroundColor={background()}>
                 <text fg={isCurrent() ? accent() : base()}>
-                  {prefix() + (row.collapsed ? "▸ " : "▾ ") + truncate(`${label}  ·  ${detail}`, contentWidth())}
+                  {prefix() + (row.collapsed ? "▸ " : "▾ ") + truncate(`${label}  ·  ${detail}`, width() - 6)}
                 </text>
               </box>
             )
           }
-          const suffix =
-            (row.priority ? ` (${row.priority})` : "") + (row.line !== undefined ? `  :${row.line}` : "")
+          const cols = columns()
+          const parts = [prefix() + statusMark(row.status)]
+          if (cols.id > 0) parts.push(idTag(row.id).padEnd(cols.id))
+          if (cols.priority > 0) parts.push(priorityTag(row.priority).padEnd(cols.priority))
+          parts.push(truncate(row.content + (row.line !== undefined ? `  :${row.line}` : ""), contentWidth()))
           return (
             <box backgroundColor={background()}>
               <text fg={row.status === "completed" ? muted() : isCurrent() ? accent() : base()}>
-                {prefix() + statusMark(row.status) + " " + truncate(row.content + suffix, contentWidth())}
+                {parts.join("  ")}
               </text>
             </box>
           )

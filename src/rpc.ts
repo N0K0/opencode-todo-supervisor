@@ -10,7 +10,7 @@ import type { Plugin } from "@opencode/plugin"
 import { Rpc } from "@opencode/plugin/rpc"
 import { effectiveFiles, MarkdownCache, resolveMarkdownPath, toggleMarkdownItem } from "./markdown"
 import type { Options } from "./options"
-import type { TodoStore } from "./storage"
+import { nextId, type TodoItem, type TodoStore } from "./storage"
 import type { Supervisor } from "./supervisor"
 
 // Kept for consumers/tests that import the resolver from the RPC module.
@@ -55,8 +55,46 @@ export const TodoRpc = Rpc.define({
     toggle: {
       input: {
         type: "object",
-        properties: { sessionID: { type: "string" }, index: { type: "number" } },
-        required: ["sessionID", "index"],
+        properties: { sessionID: { type: "string" }, id: { type: "string" }, index: { type: "number" } },
+        required: ["sessionID"],
+        additionalProperties: false,
+      } as const,
+      output: objectOutput,
+    },
+    /** Append one item to the session list; returns its new id. */
+    addItem: {
+      input: {
+        type: "object",
+        properties: {
+          sessionID: { type: "string" },
+          content: { type: "string" },
+          priority: { type: "string", enum: ["high", "medium", "low"] },
+        },
+        required: ["sessionID", "content"],
+        additionalProperties: false,
+      } as const,
+      output: objectOutput,
+    },
+    /** Remove one session item by id. */
+    removeItem: {
+      input: {
+        type: "object",
+        properties: { sessionID: { type: "string" }, id: { type: "string" } },
+        required: ["sessionID", "id"],
+        additionalProperties: false,
+      } as const,
+      output: objectOutput,
+    },
+    /** Set one item's priority (or clear it with `none`). */
+    setPriority: {
+      input: {
+        type: "object",
+        properties: {
+          sessionID: { type: "string" },
+          id: { type: "string" },
+          priority: { type: "string", enum: ["high", "medium", "low", "none"] },
+        },
+        required: ["sessionID", "id", "priority"],
         additionalProperties: false,
       } as const,
       output: objectOutput,
@@ -217,18 +255,89 @@ export async function registerTodoRpc(ctx: Plugin.Context, deps: RpcDeps): Promi
     toggle: async (raw) => {
       const input = requireObject(raw)
       const sessionID = requireString(input.sessionID, "sessionID")
-      const index = requireNumber(input.index, "index")
       const state = await store.refreshTodos(sessionID)
       const items = state?.items ?? []
-      const item = items[index]
-      if (!item) throw new Error(`invalid input: "index" ${index} is out of range`)
+      let index: number
+      if (input.id !== undefined) {
+        const id = requireString(input.id, "id")
+        index = items.findIndex((item) => item.id === id)
+        if (index === -1) throw new Error(`invalid input: no item with id ${JSON.stringify(id)}`)
+      } else {
+        index = requireNumber(input.index, "index")
+        if (!items[index]) throw new Error(`invalid input: "index" ${index} is out of range`)
+      }
+      const item = items[index]!
       const status: "pending" | "completed" = item.status === "completed" ? "pending" : "completed"
       const next = items.map((entry, i) => (i === index ? { ...entry, status } : entry))
       await store.setTodos(sessionID, next)
       supervisor.notifyTodosChanged(sessionID)
       await emitEvent("updated", { sessionID })
-      log(`rpc toggle (${sessionID}) index=${index} → ${status}`)
-      return { sessionID, index, status }
+      log(`rpc toggle (${sessionID}) ${item.id ? `#${item.id}` : `index ${index}`} → ${status}`)
+      return { sessionID, index, id: item.id, status }
+    },
+    addItem: async (raw) => {
+      const input = requireObject(raw)
+      const sessionID = requireString(input.sessionID, "sessionID")
+      const content = requireString(input.content, "content").trim()
+      const priority =
+        input.priority === "high" || input.priority === "medium" || input.priority === "low"
+          ? input.priority
+          : undefined
+      const state = await store.refreshTodos(sessionID)
+      const items = state?.items ?? []
+      const item: TodoItem = { id: nextId(items), content, status: "pending" }
+      if (priority) item.priority = priority
+      const saved = await store.setTodos(sessionID, [...items, item])
+      supervisor.notifyTodosChanged(sessionID)
+      await emitEvent("updated", { sessionID })
+      const added = saved.items[saved.items.length - 1]!
+      log(`rpc addItem (${sessionID}) #${added.id} ${content}`)
+      return { sessionID, id: added.id, content, priority: added.priority ?? null }
+    },
+    removeItem: async (raw) => {
+      const input = requireObject(raw)
+      const sessionID = requireString(input.sessionID, "sessionID")
+      const id = requireString(input.id, "id")
+      const state = await store.refreshTodos(sessionID)
+      const items = state?.items ?? []
+      if (!items.some((item) => item.id === id)) {
+        throw new Error(`invalid input: no item with id ${JSON.stringify(id)}`)
+      }
+      await store.setTodos(
+        sessionID,
+        items.filter((item) => item.id !== id),
+      )
+      supervisor.notifyTodosChanged(sessionID)
+      await emitEvent("updated", { sessionID })
+      log(`rpc removeItem (${sessionID}) #${id}`)
+      return { sessionID, id }
+    },
+    setPriority: async (raw) => {
+      const input = requireObject(raw)
+      const sessionID = requireString(input.sessionID, "sessionID")
+      const id = requireString(input.id, "id")
+      const priority = input.priority
+      if (priority !== "high" && priority !== "medium" && priority !== "low" && priority !== "none") {
+        throw new Error('invalid input: "priority" must be high, medium, low or none')
+      }
+      const state = await store.refreshTodos(sessionID)
+      const items = state?.items ?? []
+      if (!items.some((item) => item.id === id)) {
+        throw new Error(`invalid input: no item with id ${JSON.stringify(id)}`)
+      }
+      const next = items.map((item) => {
+        if (item.id !== id) return item
+        if (priority === "none") {
+          const { priority: _dropped, ...rest } = item
+          return rest
+        }
+        return { ...item, priority }
+      })
+      await store.setTodos(sessionID, next)
+      supervisor.notifyTodosChanged(sessionID)
+      await emitEvent("updated", { sessionID })
+      log(`rpc setPriority (${sessionID}) #${id} → ${priority}`)
+      return { sessionID, id, priority: priority === "none" ? null : priority }
     },
     toggleFile: async (raw) => {
       const input = requireObject(raw)

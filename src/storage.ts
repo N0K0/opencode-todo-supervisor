@@ -10,6 +10,14 @@ export type TodoStatus = "pending" | "in_progress" | "completed" | "canceled"
 export type TodoPriority = "high" | "medium" | "low"
 
 export type TodoItem = {
+  /**
+   * Stable per-session identifier (a numeric string, e.g. `"3"`), assigned by
+   * the store when an item is first written and preserved across full-list
+   * rewrites by matching content. Optional in the type so callers and tests can
+   * build ad-hoc items; anything reaching storage is normalised by
+   * {@link assignIds}.
+   */
+  id?: string
   content: string
   status: TodoStatus
   priority?: TodoPriority
@@ -54,6 +62,7 @@ export function parseTodoState(value: unknown): TodoState | undefined {
     const status = entry.status
     if (status !== "pending" && status !== "in_progress" && status !== "completed" && status !== "canceled") continue
     const item: TodoItem = { content: entry.content, status }
+    if (typeof entry.id === "string" && entry.id !== "") item.id = entry.id
     if (entry.priority === "high" || entry.priority === "medium" || entry.priority === "low") {
       item.priority = entry.priority
     }
@@ -62,7 +71,8 @@ export function parseTodoState(value: unknown): TodoState | undefined {
   return {
     version: 1,
     sessionID: value.sessionID,
-    items,
+    // Legacy rows predate ids; backfill them deterministically on load.
+    items: assignIds(items),
     updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : 0,
   }
 }
@@ -113,7 +123,10 @@ export class TodoStore {
   }
 
   async setTodos(sessionID: string, items: TodoItem[]): Promise<TodoState> {
-    const state: TodoState = { version: 1, sessionID, items, updatedAt: Date.now() }
+    // Central id assignment: every stored list has stable ids, and a rewrite
+    // that keeps an item's content keeps its id (see assignIds).
+    const previous = this.todos.get(sessionID)?.items ?? []
+    const state: TodoState = { version: 1, sessionID, items: assignIds(items, previous), updatedAt: Date.now() }
     await this.storage.set(todosKey(sessionID), state)
     this.todos.set(sessionID, state)
     return state
@@ -183,4 +196,55 @@ export function isDone(items: readonly TodoItem[]): boolean {
 
 export function hashList(items: readonly TodoItem[]): string {
   return JSON.stringify(items.map((item) => [item.content, item.status, item.priority ?? ""]))
+}
+
+// ---- stable ids (§5.3) ------------------------------------------------------
+
+function numericId(id: string | undefined): number {
+  const value = Number(id)
+  return Number.isInteger(value) && value > 0 ? value : 0
+}
+
+/** Highest numeric id in a list (0 when the list is empty or unnumbered). */
+export function maxId(items: readonly TodoItem[]): number {
+  return items.reduce((max, item) => Math.max(max, numericId(item.id)), 0)
+}
+
+/** Next free id for a list (one above the highest id ever used). */
+export function nextId(items: readonly TodoItem[]): string {
+  return String(maxId(items) + 1)
+}
+
+/**
+ * Give every item a stable id. An id already on the item is kept when it is
+ * valid and unique; otherwise the id of a `previous` item with the same content
+ * is reused (so `todo_write`, which resends the whole list, does not renumber
+ * everything); otherwise a fresh id above every id seen so far is allocated.
+ *
+ * Ids are deliberately not part of {@link hashList}: renumbering must never look
+ * like a content change to the supervisor.
+ */
+export function assignIds(items: readonly TodoItem[], previous: readonly TodoItem[] = []): TodoItem[] {
+  const pool = [...previous]
+  const used = new Set<string>()
+  let counter = Math.max(maxId(previous), maxId(items))
+  const out: TodoItem[] = []
+
+  for (const item of items) {
+    let id = typeof item.id === "string" && item.id !== "" && !used.has(item.id) ? item.id : undefined
+    if (id === undefined) {
+      const index = pool.findIndex(
+        (entry) => entry.content === item.content && typeof entry.id === "string" && !used.has(entry.id),
+      )
+      if (index !== -1) {
+        id = pool[index]!.id
+        pool.splice(index, 1)
+      }
+    }
+    if (id === undefined) id = String(++counter)
+    used.add(id)
+    out.push(item.id === id ? item : { ...item, id })
+  }
+
+  return out
 }

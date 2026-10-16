@@ -6,9 +6,12 @@ import {
   countOpen,
   dialogWidth,
   footerHints,
+  idTag,
   isSelectable,
+  itemColumns,
   moveCursor,
   popoverBodyHeight,
+  priorityTag,
   progressBar,
   quietLabel,
   statusMark,
@@ -20,9 +23,9 @@ import {
 
 const snapshot = (): PanelSnapshot => ({
   items: [
-    { content: "first task", status: "pending", priority: "high" },
-    { content: "second task", status: "in_progress" },
-    { content: "third task", status: "completed" },
+    { id: "1", content: "first task", status: "pending", priority: "high" },
+    { id: "2", content: "second task", status: "in_progress" },
+    { id: "3", content: "third task", status: "completed" },
   ],
   files: [
     {
@@ -104,6 +107,7 @@ describe("panel rows", () => {
     expect(sessionHeader.kind === "section" && sessionHeader.detail).toBe("2 open of 3")
     const firstItem = rows[1]!
     expect(firstItem.kind === "item" && firstItem.key).toBe("session:0")
+    expect(firstItem.kind === "item" && firstItem.id).toBe("1")
     expect(firstItem.kind === "item" && firstItem.priority).toBe("high")
     const fileRow = rows[4]!
     expect(fileRow.kind === "file" && fileRow.open).toBe(1)
@@ -168,26 +172,43 @@ describe("panel cursor", () => {
   })
 
   test("footer hints shrink with the terminal width", () => {
-    expect(footerHints(140).length).toBe(13)
+    expect(footerHints(140).length).toBe(16)
+    expect(footerHints(140)).toContain("a add task")
+    expect(footerHints(140)).toContain("p priority")
     expect(footerHints(90).length).toBe(8)
     expect(footerHints(40)).toEqual(["↑↓", "space toggle", "n nudge", "/ filter", "? help", "esc"])
   })
 
-  test("popover body height stays a popover on any terminal", () => {
-    expect(popoverBodyHeight(40)).toBe(16)
-    expect(popoverBodyHeight(24)).toBe(14)
-    expect(popoverBodyHeight(24, 1)).toBe(13)
-    expect(popoverBodyHeight(14)).toBe(4)
-    expect(popoverBodyHeight(50, 2)).toBe(16)
+  test("popover body height scales with the terminal", () => {
+    expect(popoverBodyHeight(40)).toBe(28)
+    expect(popoverBodyHeight(24)).toBe(16)
+    expect(popoverBodyHeight(24, 1)).toBe(15)
+    expect(popoverBodyHeight(14)).toBe(6)
+    expect(popoverBodyHeight(50, 2)).toBe(35)
+    // Never taller than a popover on a very tall terminal.
+    expect(popoverBodyHeight(200)).toBe(48)
   })
 
   test("popover width follows the dialog size and clamps", () => {
-    expect(dialogWidth("medium", 200)).toBe(72)
-    expect(dialogWidth("large", 200)).toBe(140)
-    expect(dialogWidth("xlarge", 200)).toBe(140)
-    expect(dialogWidth("medium", 80)).toBe(56)
+    expect(dialogWidth("medium", 200)).toBe(120)
+    expect(dialogWidth("large", 200)).toBe(160)
+    expect(dialogWidth("xlarge", 200)).toBe(180)
+    expect(dialogWidth("medium", 80)).toBe(48)
     expect(dialogWidth("large", 80)).toBe(64)
-    expect(dialogWidth("xlarge", 80)).toBe(72)
+    expect(dialogWidth("xlarge", 80)).toBe(76)
     expect(dialogWidth("xlarge", 20)).toBe(36)
+    // xlarge tracks the window instead of a fixed cap.
+    expect(dialogWidth("xlarge", 120)).toBe(114)
+  })
+
+  test("id and priority tags and their column widths", () => {
+    expect(idTag(undefined)).toBe("")
+    expect(idTag("12")).toBe("#12")
+    expect(priorityTag(undefined)).toBe("")
+    expect(priorityTag("high")).toBe("high")
+    expect(priorityTag("medium")).toBe("med")
+    expect(priorityTag("low")).toBe("low")
+    expect(itemColumns([{ id: "3", priority: "high" }, { id: "12" }])).toEqual({ id: 3, priority: 4 })
+    expect(itemColumns([{ content: "x", status: "pending" }])).toEqual({ id: 0, priority: 0 })
   })
 })

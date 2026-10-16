@@ -7,7 +7,9 @@ import { DEFAULTS } from "./options"
 import { MarkdownCache } from "./markdown"
 import {
   makeContextInjector,
+  makeTodoAdd,
   makeTodoRead,
+  makeTodoRemove,
   makeTodoSubscribe,
   makeTodoUnsubscribe,
   makeTodoWrite,
@@ -55,6 +57,14 @@ describe("renderers", () => {
     expect(renderList([])).toBe("No todos.")
   })
 
+  test("renderList prefixes ids when present", () => {
+    const list: TodoItem[] = [
+      { id: "1", content: "done", status: "completed" },
+      { id: "2", content: "open", status: "pending", priority: "high" },
+    ]
+    expect(renderList(list)).toBe("- #1 [x] done\n- #2 [ ] open (high)")
+  })
+
   test("renderSummary counts and flags open work", () => {
     const summary = renderSummary([
       { content: "done", status: "completed" },
@@ -80,11 +90,11 @@ describe("todo tools round-trip", () => {
       { todos: [{ content: "step 1", status: "in_progress" }, { content: "step 2", status: "pending" }] },
       { sessionID: "ses_1" },
     )
-    expect(writeResult.content[0]?.text).toContain("- [~] step 1")
+    expect(writeResult.content[0]?.text).toContain("- #1 [~] step 1")
     expect(changed).toEqual(["ses_1"])
 
     const readResult = await read.execute({}, { sessionID: "ses_1" })
-    expect(readResult.content[0]?.text).toContain("- [ ] step 2")
+    expect(readResult.content[0]?.text).toContain("- #2 [ ] step 2")
     expect(readResult.content[0]?.text).toContain("2 open of 2 items.")
   })
 
@@ -107,6 +117,53 @@ describe("todo tools round-trip", () => {
     expect(result.content[0]?.text).toContain("todo_write failed")
     expect(String((result.metadata as { error?: string } | undefined)?.error)).toContain("disk full")
     expect(logs.some((line) => line.includes("todo_write failed"))).toBe(true)
+  })
+})
+
+describe("todo_add / todo_remove", () => {
+  test("add appends with a fresh id and reports it", async () => {
+    const store = new TodoStore(new FakeStorage())
+    await store.setTodos("s1", [{ content: "one", status: "pending" }])
+    const changed: string[] = []
+    const add = makeTodoAdd(store, { onTodosChanged: (id) => changed.push(id) })
+    const result = await add.execute({ content: "  two  ", priority: "high" }, { sessionID: "s1" })
+    expect(result.content[0]?.text).toContain("Added #2 two (high)")
+    expect((result.metadata as { id?: string }).id).toBe("2")
+    expect(store.getTodos("s1")?.items.map((item) => [item.id, item.content, item.priority])).toEqual([
+      ["1", "one", undefined],
+      ["2", "two", "high"],
+    ])
+    expect(changed).toEqual(["s1"])
+  })
+
+  test("add refuses a duplicate content and an empty content", async () => {
+    const store = new TodoStore(new FakeStorage())
+    await store.setTodos("s1", [{ content: "one", status: "pending" }])
+    const add = makeTodoAdd(store, {})
+    const duplicate = await add.execute({ content: "one" }, { sessionID: "s1" })
+    expect(duplicate.content[0]?.text).toContain("Already on the list as #1")
+    expect(store.getTodos("s1")?.items.length).toBe(1)
+
+    const empty = await add.execute({ content: "   " }, { sessionID: "s1" })
+    expect(empty.content[0]?.text).toContain("todo_add failed")
+    expect(store.getTodos("s1")?.items.length).toBe(1)
+  })
+
+  test("remove drops one item by id and reports it", async () => {
+    const store = new TodoStore(new FakeStorage())
+    await store.setTodos("s1", [
+      { content: "one", status: "pending" },
+      { content: "two", status: "pending" },
+    ])
+    const changed: string[] = []
+    const remove = makeTodoRemove(store, { onTodosChanged: (id) => changed.push(id) })
+    const result = await remove.execute({ id: "1" }, { sessionID: "s1" })
+    expect(result.content[0]?.text).toContain("Removed #1: one")
+    expect(store.getTodos("s1")?.items.map((item) => item.id)).toEqual(["2"])
+    expect(changed).toEqual(["s1"])
+
+    const missing = await remove.execute({ id: "9" }, { sessionID: "s1" })
+    expect(missing.content[0]?.text).toContain("todo_remove failed")
   })
 })
 
@@ -158,7 +215,7 @@ describe("markdown tools (§5.2, aspect 14)", () => {
     const result = await read.execute({}, { sessionID: "s1" })
     const text = result.content[0]?.text ?? ""
     expect(text).toContain("2 open of 2 items.")
-    expect(text).toContain("- [ ] session task")
+    expect(text).toContain("- #1 [ ] session task")
     expect(text).toContain("- [ ] file task  (" + shown + ":1)")
   })
 })

@@ -4,7 +4,8 @@ An [OpenCode](https://opencode.ai) **V2** plugin that gives every session a real
 todo list — and then keeps the agent working on it. A live progress strip in the
 composer (`📋 ███░░░░░ 8/17 open`) tracks the list.
 
-- `todo_write` / `todo_read` tools (V2 ships none), stored per session;
+- `todo_write` / `todo_read` / `todo_add` / `todo_remove` tools (V2 ships none),
+  stored per session, with stable per-item ids;
 - a **supervisor** that re-prompts an idle session while its list still has open
   items — and stays quiet while the agent is actually working (thinking,
   preparing a tool, a running tool or `task` subagent, background shells, child
@@ -22,7 +23,7 @@ Tested against OpenCode `2.0.24`.
 ## Install
 
 ```sh
-opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.4
+opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.5
 ```
 
 This also loads the bundled TUI entry. To pass options, use the object form:
@@ -77,8 +78,13 @@ and makes finishing it the path of least resistance:
 
 ## Tools
 
-Four tools, all registered with `codemode: true` so Code Mode agents can call
+Six tools, all registered with `codemode: true` so Code Mode agents can call
 them too. Together they are the whole interface the model uses.
+
+Every item has a **stable id** (a number, e.g. `3`), assigned when the item is
+first written and preserved across list rewrites by matching content. Ids are
+shown as `#3` in `todo_read`, in the injected context block, and in the panel,
+and are what `todo_remove` and the panel's remove key take.
 
 ### `todo_write`
 
@@ -88,6 +94,7 @@ Replaces the session's list.
 {
   "todos": [
     {
+      "id": "3",
       "content": "string",
       "status": "pending | in_progress | completed | canceled",
       "priority": "high | medium | low"
@@ -96,14 +103,35 @@ Replaces the session's list.
 }
 ```
 
-`content` and `status` are required; `priority` is optional.
+`content` and `status` are required; `id` and `priority` are optional.
 
-- The list **replaces** the previous one — always send the complete list.
+- The list **replaces** the previous one — always send the complete list. Echo
+  each item's `id` to keep it; items without an id are matched to the previous
+  list by content, and anything new gets a fresh id.
 - At most one item may be `in_progress`; extra ones are demoted to `pending` and
   the result says so.
 - Content is trimmed, empty entries dropped, duplicates removed.
-- Returns the summary plus the canonical list, and resets the supervisor's
-  no-progress counter and any pause.
+- Returns the summary plus the canonical list (with ids), and resets the
+  supervisor's no-progress counter and any pause.
+
+### `todo_add`
+
+```json
+{ "content": "string", "priority": "high | medium | low", "status": "pending | …" }
+```
+
+Appends one item without resending the whole list, and returns its new id.
+`content` is required; `priority` and `status` are optional (`pending` by
+default). Adding content that is already on the list returns the existing id
+instead of creating a duplicate.
+
+### `todo_remove`
+
+```json
+{ "id": "3" }
+```
+
+Removes one item by its id.
 
 ### `todo_read`
 
@@ -128,7 +156,7 @@ Same input as `todo_subscribe`. Stops supervising a file, and also shadows a
 
 ## Markdown mode
 
-Subscribe files with `todo_subscribe`, the panel (`a` / `d`), or config. The
+Subscribe files with `todo_subscribe`, the panel (`A` / `D`), or config. The
 effective set is `config.markdownFiles ∪ stored files − removed` per session.
 
 - Conventions: `- [ ]` open, `- [x]`/`- [X]` completed, `- [~]` canceled. `-`,
@@ -147,17 +175,21 @@ effective set is `config.markdownFiles ∪ stored files − removed` per session
 - **Composer strip** (`session.composer.top`): `📋 ███░░░░░ 8/17 open` (plus `⏸`
   while paused), hidden when there is neither a list nor a subscription.
 - **Popover** (`/todos`, palette "Todo: open todos"): a centered overlay dialog.
-  The body is height-bounded (up to 16 rows) so the key legend is always visible;
-  the header shows `open/total` and the selected `row n/m`. `f` cycles the dialog
-  size (medium → large → xlarge), `esc` closes it.
+  Its body and width scale with the terminal (up to 48 rows / a share of the
+  window), so the key legend stays visible on a short terminal and a tall one
+  shows more rows; the header shows `open/total` and the selected `row n/m`. `f`
+  cycles the dialog size (medium → large → xlarge), `esc` closes it.
   - header: progress bar, `open/total`, and a supervision chip (`idle · quiet
     12s · nudges 2`, `working: 1 tool · 1 shell · quiet 4s`, `paused
     (no-progress)`, `not supervised`);
   - body: a `SESSION` section, then one collapsible section per subscribed file
-    (`n open of m`, `(missing)` badge, `:line` refs);
+    (`n open of m`, `(missing)` badge, `:line` refs). Session rows lead with the
+    item's `#id` and a priority column (`high` / `med` / `low`), so both are
+    visible at a glance and columns line up across the list;
   - keys: `↑↓`/`jk` move, `pgup`/`pgdn`, `home`/`end`/`g`/`G`, `space`/`x` toggle
     (session item, markdown item, or collapse a file row), `enter` collapse, `n`
-    nudge now, `s` pause/resume, `a` add file, `d` remove file, `r` refresh, `/`
+    nudge now, `s` pause/resume, `a` add task, `d` remove task (confirmed), `p`
+    cycle a task's priority, `A` add file, `D` remove file, `r` refresh, `/`
     filter, `f` resize, `c` clear (confirm), `?` help, `escape` close;
   - it re-reads every 3 s while open, so edits made outside OpenCode show up
     without waiting for an event.
@@ -188,7 +220,10 @@ Contract id `todo` (`opencode-todo-supervisor/rpc`). The TUI uses
 | `clear` | `{ sessionID }` | Drop the stored list (subscriptions stay) |
 | `nudge` | `{ sessionID }` | Send a nudge now (same dedupe/ownership rules as automatic nudges) |
 | `setEnabled` | `{ sessionID, enabled }` | Per-session supervision kill switch |
-| `toggle` | `{ sessionID, index }` | Flip one session item between completed and pending |
+| `toggle` | `{ sessionID, id }` or `{ sessionID, index }` | Flip one session item between completed and pending |
+| `addItem` | `{ sessionID, content, priority? }` | Append one item; returns its new id |
+| `removeItem` | `{ sessionID, id }` | Remove one session item by id |
+| `setPriority` | `{ sessionID, id, priority }` | Set a priority (`high`/`medium`/`low`) or clear it with `none` |
 | `toggleFile` | `{ sessionID, path, line }` | Toggle a checklist item inside a subscribed markdown file |
 | `subscribe` | `{ sessionID, path }` | Subscribe a markdown file |
 | `unsubscribe` | `{ sessionID, path }` | Shadow a subscription |
@@ -307,12 +342,14 @@ A thin wrapper over `ctx.storage` (durable JSON scoped to the plugin):
 
 | Key | Value |
 | --- | --- |
-| `todos/<sessionID>` | `{ version, sessionID, items[], updatedAt }` |
+| `todos/<sessionID>` | `{ version, sessionID, items[{ id, content, status, priority? }], updatedAt }` |
 | `subs/<sessionID>` | `{ version, sessionID, files[], removed[], updatedAt }` |
 | `claims/<sessionID>` | `{ tag, at }` — hot-reload ownership |
 
 On startup the plugin scans `todos/` and reconciles against `ctx.session.get()`
 (session gone → drop the entry; session alive → register and evaluate once).
+Ids are assigned centrally on every write (and backfilled deterministically when
+loading rows that predate them), so a list read from disk always has ids.
 Supervision counters (nudge counts, no-progress, pause) are in-memory only; a
 restart resets them, which is deliberate and simpler. Sessions are dropped on
 `session.deleted`.
@@ -340,7 +377,7 @@ There is no filesystem watcher. Instead:
   (source edits and config content changes; `touch` alone does not).
 - `opencode2 reload` forces reconciliation; `opencode2 service restart` only as a
   last resort (it interrupts sessions).
-- Tests: `bun test` (106 tests across parser, storage, tools, RPC, state machine,
+- Tests: `bun test` (121 tests across parser, storage, tools, RPC, state machine,
   panel helpers).
 - Watch logs: `tail -f ~/.local/share/opencode/log/todo-supervisor.log`.
 
@@ -348,6 +385,8 @@ There is no filesystem watcher. Instead:
 
 - The TUI panel/keyboard actions and toasts need a running TUI; the strip counts
   refresh on RPC `updated` (i.e. immediately after `todo_write`).
+- The panel adds and removes **session** tasks (`a` / `d`). Markdown items are
+  owned by their file: toggle one with `x`/`space`, edit the file to remove it.
 - Markdown write-back edits your files: `x` on a markdown row rewrites that
   checkbox in place (temp file + atomic rename, only for subscribed paths). Use
   the panel filter and `d` if you only want to read.

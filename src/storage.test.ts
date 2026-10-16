@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import {
+  assignIds,
   hashList,
   isDone,
+  maxId,
+  nextId,
   openItems,
   TodoStore,
   type StorageLike,
@@ -34,7 +37,7 @@ export class FakeStorage implements StorageLike {
 }
 
 const items = (n: number): TodoItem[] =>
-  Array.from({ length: n }, (_, i) => ({ content: `task ${i}`, status: "pending" as const }))
+  Array.from({ length: n }, (_, i) => ({ id: String(i + 1), content: `task ${i}`, status: "pending" as const }))
 
 describe("TodoStore", () => {
   test("round-trips items identically in order", async () => {
@@ -97,5 +100,57 @@ describe("helpers", () => {
     const b: TodoItem[] = [{ content: "a", status: "pending", priority: "high" }]
     expect(hashList(a)).toBe(hashList(b))
     expect(hashList(a)).not.toBe(hashList([{ content: "a", status: "completed", priority: "high" }]))
+  })
+
+  test("hashList ignores ids (renumbering is not a content change)", () => {
+    const withA: TodoItem[] = [{ id: "1", content: "a", status: "pending" }]
+    const withB: TodoItem[] = [{ id: "9", content: "a", status: "pending" }]
+    expect(hashList(withA)).toBe(hashList(withB))
+  })
+})
+
+describe("stable ids", () => {
+  test("assignIds numbers a fresh list and is stable", () => {
+    const first = assignIds([{ content: "a", status: "pending" }, { content: "b", status: "pending" }])
+    expect(first.map((item) => item.id)).toEqual(["1", "2"])
+    // Re-running over its own output changes nothing.
+    expect(assignIds(first)).toEqual(first)
+  })
+
+  test("assignIds preserves ids across a content rewrite, matching by content", () => {
+    const previous = assignIds([{ content: "a", status: "pending" }, { content: "b", status: "pending" }])
+    const rewritten = assignIds([{ content: "b", status: "completed" }, { content: "c", status: "pending" }], previous)
+    expect(rewritten).toEqual([
+      { id: "2", content: "b", status: "completed" },
+      { id: "3", content: "c", status: "pending" },
+    ])
+  })
+
+  test("assignIds keeps explicit ids and never reuses a freed one immediately", () => {
+    const previous: TodoItem[] = [{ id: "1", content: "a", status: "pending" }]
+    const explicit = assignIds([{ id: "7", content: "z", status: "pending" }], previous)
+    expect(explicit[0]!.id).toBe("7")
+
+    // ids continue above the highest ever used, even after removals.
+    const grown = assignIds([{ content: "fresh", status: "pending" }], [{ id: "5", content: "gone", status: "completed" }])
+    expect(grown[0]!.id).toBe("6")
+  })
+
+  test("maxId / nextId", () => {
+    expect(maxId([])).toBe(0)
+    expect(maxId([{ content: "a", status: "pending" }, { id: "4", content: "b", status: "pending" }])).toBe(4)
+    expect(nextId([{ id: "4", content: "b", status: "pending" }])).toBe("5")
+  })
+
+  test("the store backfills ids for legacy rows", async () => {
+    const storage = new FakeStorage()
+    await storage.set("todos/legacy", {
+      version: 1,
+      sessionID: "legacy",
+      items: [{ content: "one", status: "pending" }, { content: "two", status: "pending" }],
+      updatedAt: 0,
+    })
+    const store = new TodoStore(storage)
+    expect((await store.loadTodos("legacy"))?.items.map((item) => item.id)).toEqual(["1", "2"])
   })
 })

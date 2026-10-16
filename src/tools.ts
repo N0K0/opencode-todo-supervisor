@@ -3,7 +3,7 @@ import { isAbsolute, resolve as resolvePath } from "node:path"
 import type { Plugin } from "@opencode/plugin"
 import { effectiveFiles, MarkdownCache, renderFileSection, resolveMarkdownPath } from "./markdown"
 import type { Options } from "./options"
-import { openItems, type TodoItem, type TodoStore, type TodoStatus } from "./storage"
+import { nextId, openItems, type TodoItem, type TodoPriority, type TodoStore, type TodoStatus } from "./storage"
 
 export interface ToolHooks {
   /** Fired after a successful `todo_write` (supervisor reset, RPC notify, …). */
@@ -45,6 +45,7 @@ export function normalizeItems(raw: readonly TodoItem[]): { items: TodoItem[]; n
     }
 
     const item: TodoItem = { content, status }
+    if (typeof entry.id === "string" && entry.id.trim() !== "") item.id = entry.id.trim()
     if (entry.priority === "high" || entry.priority === "medium" || entry.priority === "low") {
       item.priority = entry.priority
     }
@@ -68,7 +69,10 @@ export function normalizeItems(raw: readonly TodoItem[]): { items: TodoItem[]; n
 export function renderList(items: readonly TodoItem[]): string {
   if (items.length === 0) return "No todos."
   return items
-    .map((item) => `- ${MARKERS[item.status]} ${item.content}${item.priority ? ` (${item.priority})` : ""}`)
+    .map((item) => {
+      const tag = item.id ? `#${item.id} ` : ""
+      return `- ${tag}${MARKERS[item.status]} ${item.content}${item.priority ? ` (${item.priority})` : ""}`
+    })
     .join("\n")
 }
 
@@ -93,6 +97,7 @@ export function renderSummary(items: readonly TodoItem[], notes: readonly string
 const TODO_ITEM_SCHEMA = {
   type: "object",
   properties: {
+    id: { type: "string" },
     content: { type: "string" },
     status: { type: "string", enum: ["pending", "in_progress", "completed", "canceled"] },
     priority: { type: "string", enum: ["high", "medium", "low"] },
@@ -104,7 +109,15 @@ const TODO_ITEM_SCHEMA = {
 const WRITE_DESCRIPTION =
   "Replace the session's todo list. Use this to plan multi-step work and keep progress visible: " +
   "send the complete list every time (it replaces the previous one). Keep exactly one item `in_progress`. " +
-  "Before ending your turn every item must be `completed` or `canceled` — a supervisor will continue the session while items remain open."
+  "Before ending your turn every item must be `completed` or `canceled` — a supervisor will continue the session while items remain open. " +
+  "Each item has a stable `id`; include it to keep the same item across rewrites (otherwise it is matched by content)."
+
+const ADD_DESCRIPTION =
+  "Add one item to the session's todo list without resending the whole list. Returns the new item's id. " +
+  "Prefer this (or todo_write) over rewriting the list to append a single task."
+
+const REMOVE_DESCRIPTION =
+  "Remove one item from the session's todo list by its id (see the ids in todo_read / the injected todo block)."
 
 const READ_DESCRIPTION =
   "Read the session's current todo list (canonical state as stored by todo_write). " +
@@ -155,11 +168,12 @@ export function makeTodoWrite(store: TodoStore, hooks: ToolHooks) {
     async execute(input: { todos: TodoItem[] }, context: ToolContextLike) {
       try {
         const { items, notes } = normalizeItems(Array.isArray(input?.todos) ? input.todos : [])
-        await store.setTodos(context.sessionID, items)
+        const state = await store.setTodos(context.sessionID, items)
         hooks.onTodosChanged?.(context.sessionID)
+        const saved = state.items
         return {
-          content: [{ type: "text" as const, text: `${renderSummary(items, notes)}\n\n${renderList(items)}` }],
-          metadata: { items: items.length, open: openItems(items).length },
+          content: [{ type: "text" as const, text: `${renderSummary(saved, notes)}\n\n${renderList(saved)}` }],
+          metadata: { items: saved.length, open: openItems(saved).length },
         }
       } catch (err) {
         hooks.log?.(`todo_write failed (${context.sessionID}): ${String(err)}`)
@@ -209,6 +223,121 @@ export function makeTodoRead(store: TodoStore, hooks: ToolHooks = {}, deps?: Mar
         hooks.log?.(`todo_read failed (${context.sessionID}): ${String(err)}`)
         return {
           content: [{ type: "text" as const, text: `todo_read failed: ${String(err)}` }],
+          metadata: { error: String(err) },
+        }
+      }
+    },
+  }
+}
+
+function validPriority(value: unknown): TodoPriority | undefined {
+  return value === "high" || value === "medium" || value === "low" ? value : undefined
+}
+
+function validStatus(value: unknown): TodoStatus | undefined {
+  return value === "pending" || value === "in_progress" || value === "completed" || value === "canceled"
+    ? value
+    : undefined
+}
+
+export function makeTodoAdd(store: TodoStore, hooks: ToolHooks) {
+  return {
+    name: "todo_add",
+    description: ADD_DESCRIPTION,
+    input: {
+      type: "object",
+      properties: {
+        content: { type: "string" },
+        priority: { type: "string", enum: ["high", "medium", "low"] },
+        status: { type: "string", enum: ["pending", "in_progress", "completed", "canceled"] },
+      },
+      required: ["content"],
+      additionalProperties: false,
+    },
+    options: { codemode: true as const },
+    async execute(input: { content?: string; priority?: string; status?: string }, context: ToolContextLike) {
+      try {
+        const content = String(input?.content ?? "").trim()
+        if (!content) throw new Error('"content" must be a non-empty string')
+        const state = await store.refreshTodos(context.sessionID)
+        const existing = state?.items ?? []
+        const duplicate = existing.find((item) => item.content === content)
+        if (duplicate) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Already on the list as #${duplicate.id ?? "?"}: ${content}\n\n${renderList(existing)}`,
+              },
+            ],
+            metadata: { items: existing.length, open: openItems(existing).length, id: duplicate.id },
+          }
+        }
+        const item: TodoItem = { id: nextId(existing), content, status: validStatus(input?.status) ?? "pending" }
+        const priority = validPriority(input?.priority)
+        if (priority) item.priority = priority
+        const saved = await store.setTodos(context.sessionID, [...existing, item])
+        hooks.onTodosChanged?.(context.sessionID)
+        const added = saved.items[saved.items.length - 1]!
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `Added #${added.id} ${added.content}${added.priority ? ` (${added.priority})` : ""}.\n\n` +
+                `${renderSummary(saved.items)}\n\n${renderList(saved.items)}`,
+            },
+          ],
+          metadata: { items: saved.items.length, open: openItems(saved.items).length, id: added.id },
+        }
+      } catch (err) {
+        hooks.log?.(`todo_add failed (${context.sessionID}): ${String(err)}`)
+        return {
+          content: [{ type: "text" as const, text: `todo_add failed: ${String(err)}` }],
+          metadata: { error: String(err) },
+        }
+      }
+    },
+  }
+}
+
+export function makeTodoRemove(store: TodoStore, hooks: ToolHooks) {
+  return {
+    name: "todo_remove",
+    description: REMOVE_DESCRIPTION,
+    input: {
+      type: "object",
+      properties: { id: { type: "string" } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    options: { codemode: true as const },
+    async execute(input: { id?: string }, context: ToolContextLike) {
+      try {
+        const id = String(input?.id ?? "").trim()
+        if (!id) throw new Error('"id" must be a non-empty string')
+        const state = await store.refreshTodos(context.sessionID)
+        const existing = state?.items ?? []
+        const removed = existing.find((item) => item.id === id)
+        if (!removed) throw new Error(`no todo with id ${JSON.stringify(id)}`)
+        const saved = await store.setTodos(
+          context.sessionID,
+          existing.filter((item) => item.id !== id),
+        )
+        hooks.onTodosChanged?.(context.sessionID)
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Removed #${id}: ${removed.content}\n\n${renderSummary(saved.items)}\n\n${renderList(saved.items)}`,
+            },
+          ],
+          metadata: { items: saved.items.length, open: openItems(saved.items).length, id },
+        }
+      } catch (err) {
+        hooks.log?.(`todo_remove failed (${context.sessionID}): ${String(err)}`)
+        return {
+          content: [{ type: "text" as const, text: `todo_remove failed: ${String(err)}` }],
           metadata: { error: String(err) },
         }
       }
@@ -302,6 +431,8 @@ export async function registerTools(
   const registration = await ctx.tool.transform((editor) => {
     editor.add(makeTodoWrite(store, hooks))
     editor.add(makeTodoRead(store, hooks, { ...markdownDeps, options }))
+    editor.add(makeTodoAdd(store, hooks))
+    editor.add(makeTodoRemove(store, hooks))
     editor.add(makeTodoSubscribe(store, hooks, markdownDeps.directory))
     editor.add(makeTodoUnsubscribe(store, hooks, markdownDeps.directory))
   })
