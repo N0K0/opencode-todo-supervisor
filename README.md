@@ -23,7 +23,7 @@ Tested against OpenCode `2.0.24`.
 ## Install
 
 ```sh
-opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.9
+opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.10
 ```
 
 This also loads the bundled TUI entry. To pass options, use the object form:
@@ -175,13 +175,17 @@ effective set is `config.markdownFiles ∪ stored files − removed` per session
 - **Composer strip** (`session.composer.top`): `📋 ███░░░░░ 8/17 open` (plus `⏸`
   while paused), hidden when there is neither a list nor a subscription.
 - **Popover** (`/todos`, palette "Todo: open todos"): a centered overlay dialog,
-  opened at the widest preset. The body scales with the terminal height (up to
-  48 rows) so the key legend stays visible on a short terminal and a tall one
-  shows more rows; the header shows `open/total` and the selected `row n/m`. `f`
-  cycles the host dialog width — medium (60), large (88), xlarge (116 cells) —
-  and `esc` closes it. Rows are laid out to the card width exactly (and render
-  with wrapping off), so content never wraps and the card cannot grow past the
-  bottom of the screen.
+  opened at the widest preset. The body fills at least 60% of its budget (so a
+  short list is not a sliver) and grows up to the budget for longer lists; the
+  budget is the terminal height minus the dialog chrome, capped so it stays a
+  popover. The header shows `open/total` and the selected `row n/m`. `f` cycles
+  the host dialog width — medium (60), large (88), xlarge (116 cells) — and only
+  resizes (it never moves the dialog); `esc` closes it. Rows are laid out to the
+  card width exactly (and render with wrapping off), so content never wraps and
+  the card cannot grow past the bottom of the screen.
+  - Note: the host's `dialog.show()` resets the presentation (`centered` goes
+    back to `false`, which anchors the card a quarter of the way down), so the
+    centered flag is applied *after* `show()` and re-asserted on mount.
   - header: progress bar, `open/total`, and a supervision chip (`idle · quiet
     12s · nudges 2`, `working: 1 tool · 1 shell · quiet 4s`, `paused
     (no-progress)`, `not supervised`);

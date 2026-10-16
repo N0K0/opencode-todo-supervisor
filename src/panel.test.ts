@@ -189,6 +189,9 @@ describe("panel cursor", () => {
     expect(popoverBodyHeight(50, 2)).toBe(35)
     // Never taller than a popover on a very tall terminal.
     expect(popoverBodyHeight(200)).toBe(48)
+    // The tty's row count is a hard ceiling when the renderer overstates it.
+    expect(popoverBodyHeight(200, 0, 24)).toBe(16)
+    expect(popoverBodyHeight(40, 0, 24)).toBe(16)
   })
 
   test("popover width matches the host dialog card and clamps", () => {

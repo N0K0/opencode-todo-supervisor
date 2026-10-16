@@ -293,13 +293,17 @@ export function footerHints(width: number): string[] {
 
 /**
  * Rows the popover list body may occupy. The dialog hugs its content, so the
- * body must be bounded or the overlay grows to the whole screen; the budget
- * scales with the terminal (a taller window gets a taller popover) and is
- * capped so it stays a popover. `extraRows` accounts for conditional chrome
- * (e.g. the filter line).
+ * body must be bounded or the overlay grows past the bottom of the screen; the
+ * budget scales with the terminal and is capped so it stays a popover.
+ * `extraRows` accounts for conditional chrome (e.g. the filter line) and
+ * `terminalRows` (when known) is a hard ceiling: the renderer's own height can
+ * overstate the visible area, and that is exactly what pushes the card off the
+ * screen.
  */
-export function popoverBodyHeight(viewportHeight: number, extraRows = 0): number {
-  const total = Math.max(10, viewportHeight)
+export function popoverBodyHeight(viewportHeight: number, extraRows = 0, terminalRows?: number): number {
+  const bounded =
+    typeof terminalRows === "number" && terminalRows > 0 ? Math.min(viewportHeight, terminalRows) : viewportHeight
+  const total = Math.max(10, bounded)
   const cap = Math.max(8, Math.min(48, Math.floor(total * 0.7)))
   return Math.max(4, Math.min(total - 8 - Math.max(0, extraRows), cap))
 }

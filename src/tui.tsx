@@ -45,6 +45,8 @@ type Store = { snapshots: Record<string, PanelSnapshot>; seenOpen: Record<string
 type DialogSize = DialogSizeName
 
 const SIZE_ORDER: DialogSize[] = ["medium", "large", "xlarge"]
+/** The popover opens at the widest preset the host offers. */
+const DEFAULT_DIALOG_SIZE: DialogSize = "xlarge"
 
 /** Defensive theme reader: unknown token shapes degrade to no color. */
 function themeColor(theme: unknown, path: string): string | undefined {
@@ -95,6 +97,13 @@ export default Plugin.define({
         return typeof height === "number" && height > 0 ? height : 24
       }
       const [viewportHeight, setViewportHeight] = createSignal(rendererHeight())
+      // The tty's own row count. The renderer's height can overstate the visible
+      // area, and the dialog card hugs its content — so this is the hard ceiling
+      // the card has to fit inside.
+      const terminalRows = () => {
+        const rows = (process as unknown as { stdout?: { rows?: number } }).stdout?.rows
+        return typeof rows === "number" && rows > 0 ? rows : undefined
+      }
       const onResize = (width: number, height: number) => {
         if (typeof width === "number" && width > 0) setViewportWidth(width)
         if (typeof height === "number" && height > 0) setViewportHeight(height)
@@ -525,6 +534,16 @@ export default Plugin.define({
           return Math.max(3, available - filtered)
         }
 
+        // The scroll box never needs to be taller than the rows it holds, but a
+        // short list still gets a proper panel rather than a sliver: fill a
+        // comfortable share of the budget by default.
+        const scrollHeight = () => {
+          const budget = bodyHeight()
+          if (budget === undefined) return undefined
+          const floor = Math.max(8, Math.ceil(budget * 0.6))
+          return Math.max(1, Math.min(budget, Math.max(rows().length, floor)))
+        }
+
         const barWidth = () => Math.max(6, Math.min(40, Math.floor(width() * 0.25)))
 
         // Column widths for the `#id` / priority columns, sized to the list.
@@ -599,8 +618,8 @@ export default Plugin.define({
             </Show>
             <scrollbox
               ref={(node: unknown) => (scrollNode = node as typeof scrollNode)}
-              height={bodyHeight()}
-              flexGrow={bodyHeight() === undefined ? 1 : undefined}
+              height={scrollHeight()}
+              flexGrow={scrollHeight() === undefined ? 1 : undefined}
             >
               <For each={rows()}>
                 {(row) => (
@@ -620,22 +639,28 @@ export default Plugin.define({
       // ---- popover (an overlay dialog, like the host's own panes) -----------
 
       function TodoPopover(props: { sessionID: string }) {
-        const [size, setSize] = createSignal<DialogSize>("xlarge")
+        const [size, setSize] = createSignal<DialogSize>(DEFAULT_DIALOG_SIZE)
+        // The host defaults a dialog to *not* centered (the card is pinned a
+        // quarter of the way down and only the first `f` used to flip it). Assert
+        // it as soon as we are the active dialog, so it opens where the user
+        // expects and `f` only ever changes the size.
+        createEffect(() => {
+          try {
+            context.ui.dialog.set({ size: size(), centered: true })
+          } catch (err) {
+            logFile("tui", `dialog apply failed: ${String(err)}`)
+          }
+        })
         const cycleSize = () => {
           const next = SIZE_ORDER[(SIZE_ORDER.indexOf(size()) + 1) % SIZE_ORDER.length]!
           setSize(next)
-          try {
-            context.ui.dialog.set({ size: next, centered: true })
-          } catch (err) {
-            logFile("tui", `dialog resize failed: ${String(err)}`)
-          }
         }
         return (
           <TodoList
             sessionID={props.sessionID}
             active={() => popoverKeys(context.keymap.mode.current())}
             width={() => dialogWidth(size(), viewportWidth())}
-            height={() => popoverBodyHeight(viewportHeight())}
+            height={() => popoverBodyHeight(viewportHeight(), 0, terminalRows())}
             close={() => context.ui.dialog.clear()}
             cycleSize={cycleSize}
           />
@@ -644,11 +669,14 @@ export default Plugin.define({
 
       const openPopover = (sessionID: string): boolean => {
         try {
-          context.ui.dialog.set({ size: "xlarge", centered: true })
           context.ui.dialog.show(
             () => <TodoPopover sessionID={sessionID} />,
             () => logFile("tui", "popover closed"),
           )
+          // `show` resets the presentation (it sets `centered` back to false), so
+          // the options have to be applied *after* it, or the popover opens
+          // anchored a quarter of the way down.
+          context.ui.dialog.set({ size: DEFAULT_DIALOG_SIZE, centered: true })
           return true
         } catch (err) {
           toastError("open popover", err)
