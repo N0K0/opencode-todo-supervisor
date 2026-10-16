@@ -10,6 +10,7 @@ import {
   makeTodoAdd,
   makeTodoRead,
   makeTodoRemove,
+  makeTodoSettings,
   makeTodoSubscribe,
   makeTodoUnsubscribe,
   makeTodoWrite,
@@ -42,6 +43,19 @@ describe("normalizeItems", () => {
     ])
     expect(items.map((i) => i.status)).toEqual(["in_progress", "pending", "pending"])
     expect(notes.join(" ")).toContain("demoted 2 extra in_progress")
+  })
+
+  test("keeps every in_progress when multiple active is allowed", () => {
+    const { items, notes } = normalizeItems(
+      [
+        { content: "a", status: "in_progress" },
+        { content: "b", status: "in_progress" },
+        { content: "c", status: "pending" },
+      ],
+      true,
+    )
+    expect(items.map((i) => i.status)).toEqual(["in_progress", "in_progress", "pending"])
+    expect(notes.join(" ")).toContain("kept 2 in_progress items")
   })
 })
 
@@ -117,6 +131,74 @@ describe("todo tools round-trip", () => {
     expect(result.content[0]?.text).toContain("todo_write failed")
     expect(String((result.metadata as { error?: string } | undefined)?.error)).toContain("disk full")
     expect(logs.some((line) => line.includes("todo_write failed"))).toBe(true)
+  })
+})
+
+describe("todo_settings and multiple active items", () => {
+  const both = [
+    { content: "a", status: "in_progress" as const },
+    { content: "b", status: "in_progress" as const },
+  ]
+
+  test("the session override decides how many in_progress items are kept", async () => {
+    const store = new TodoStore(new FakeStorage())
+    const write = makeTodoWrite(store, {})
+    const settings = makeTodoSettings(store, {}, DEFAULTS)
+
+    // Default: exactly one active item survives.
+    await write.execute({ todos: both }, { sessionID: "s1" })
+    expect(store.getTodos("s1")!.items.map((i) => i.status)).toEqual(["in_progress", "pending"])
+
+    // Override on: both survive.
+    const on = await settings.execute({ allowMultipleActive: true }, { sessionID: "s1" })
+    expect(on.content[0]?.text).toContain("multiple in_progress items are allowed (session override)")
+    await write.execute({ todos: both }, { sessionID: "s1" })
+    expect(store.getTodos("s1")!.items.map((i) => i.status)).toEqual(["in_progress", "in_progress"])
+
+    // Reading without a patch reports the current settings.
+    const read = await settings.execute({}, { sessionID: "s1" })
+    expect(read.content[0]?.text).toContain("Current: multiple in_progress items are allowed")
+    expect((read.metadata as { override?: boolean | null }).override).toBe(true)
+
+    // Clearing the override falls back to the config default.
+    const cleared = await settings.execute({ allowMultipleActive: null }, { sessionID: "s1" })
+    expect(cleared.content[0]?.text).toContain("not allowed (config default)")
+    await write.execute({ todos: both }, { sessionID: "s1" })
+    expect(store.getTodos("s1")!.items.map((i) => i.status)).toEqual(["in_progress", "pending"])
+  })
+
+  test("the config option alone is enough (no override)", async () => {
+    const store = new TodoStore(new FakeStorage())
+    const write = makeTodoWrite(store, {}, { ...DEFAULTS, allowMultipleActive: true })
+    const result = await write.execute({ todos: both }, { sessionID: "s1" })
+    expect(store.getTodos("s1")!.items.map((i) => i.status)).toEqual(["in_progress", "in_progress"])
+    expect(result.content[0]?.text).toContain("kept 2 in_progress items")
+  })
+
+  test("todo_add demotes the previous active item unless several are allowed", async () => {
+    const store = new TodoStore(new FakeStorage())
+    await store.setTodos("s1", [{ content: "first", status: "in_progress" }])
+    const add = makeTodoAdd(store, {}, DEFAULTS)
+    const single = await add.execute({ content: "second", status: "in_progress" }, { sessionID: "s1" })
+    expect(single.content[0]?.text).toContain("demoted 1 previous in_progress item")
+    expect(store.getTodos("s1")!.items.map((i) => i.status)).toEqual(["pending", "in_progress"])
+
+    await makeTodoSettings(store, {}, DEFAULTS).execute({ allowMultipleActive: true }, { sessionID: "s1" })
+    await add.execute({ content: "third", status: "in_progress" }, { sessionID: "s1" })
+    expect(store.getTodos("s1")!.items.map((i) => i.status)).toEqual(["pending", "in_progress", "in_progress"])
+  })
+
+  test("todo_read reports the active mode", async () => {
+    const store = new TodoStore(new FakeStorage())
+    await store.setTodos("s1", [{ content: "task", status: "pending" }])
+    const read = makeTodoRead(store, {}, { markdown: new MarkdownCache(), options: { ...DEFAULTS }, directory: "/tmp" })
+    expect((await read.execute({}, { sessionID: "s1" })).content[0]?.text).toContain(
+      "multiple in_progress items: not allowed (config default)",
+    )
+    await makeTodoSettings(store, {}, DEFAULTS).execute({ allowMultipleActive: true }, { sessionID: "s1" })
+    expect((await read.execute({}, { sessionID: "s1" })).content[0]?.text).toContain(
+      "multiple in_progress items: allowed (session override)",
+    )
   })
 })
 
@@ -273,6 +355,7 @@ describe("context injection (§5.5)", () => {
         cache.has(sessionID)
           ? { version: 1, sessionID, items: cache.get(sessionID)!, updatedAt: 0 }
           : undefined,
+      getSettings: () => undefined,
     } as unknown as TodoStore
   }
   const noop = () => {}

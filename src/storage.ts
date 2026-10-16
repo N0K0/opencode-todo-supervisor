@@ -3,6 +3,7 @@
 // Keys:
 //   todos/<sessionID>  → { version: 1, sessionID, items, updatedAt }
 //   subs/<sessionID>   → { version: 1, sessionID, files, removed, updatedAt }
+//   settings/<sessionID> → { version: 1, sessionID, allowMultipleActive?, updatedAt }
 //
 // A full in-memory cache keeps the per-request context hook (§5.5)
 // synchronous. Supervision counters are NOT stored — restart resets them.
@@ -35,6 +36,18 @@ export type SubsState = {
   sessionID: string
   files: string[]
   removed: string[]
+  updatedAt: number
+}
+
+/**
+ * Per-session settings that shadow the config. A missing field means "not
+ * overridden" (the config default applies), so a record with no fields is
+ * meaningful and cheap to persist.
+ */
+export type SettingsState = {
+  version: 1
+  sessionID: string
+  allowMultipleActive?: boolean
   updatedAt: number
 }
 
@@ -77,8 +90,7 @@ export function parseTodoState(value: unknown): TodoState | undefined {
   }
 }
 
-export function parseSubsState(value: unknown): SubsState | undefined {
-  if (!isRecord(value) || value.version !== 1) return undefined
+export function parseSubsState(value: unknown): SubsState | undefined {  if (!isRecord(value) || value.version !== 1) return undefined
   if (typeof value.sessionID !== "string") return undefined
   const files = Array.isArray(value.files) ? value.files.filter((f): f is string => typeof f === "string") : []
   const removed = Array.isArray(value.removed) ? value.removed.filter((f): f is string => typeof f === "string") : []
@@ -91,12 +103,26 @@ export function parseSubsState(value: unknown): SubsState | undefined {
   }
 }
 
+export function parseSettingsState(value: unknown): SettingsState | undefined {
+  if (!isRecord(value) || value.version !== 1) return undefined
+  if (typeof value.sessionID !== "string") return undefined
+  const state: SettingsState = {
+    version: 1,
+    sessionID: value.sessionID,
+    updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : 0,
+  }
+  if (typeof value.allowMultipleActive === "boolean") state.allowMultipleActive = value.allowMultipleActive
+  return state
+}
+
 const todosKey = (sessionID: string) => `todos/${sessionID}`
 const subsKey = (sessionID: string) => `subs/${sessionID}`
+const settingsKey = (sessionID: string) => `settings/${sessionID}`
 
 export class TodoStore {
   private readonly todos = new Map<string, TodoState>()
   private readonly subs = new Map<string, SubsState>()
+  private readonly settings = new Map<string, SettingsState>()
 
   constructor(private readonly storage: StorageLike) {}
 
@@ -177,6 +203,33 @@ export class TodoStore {
   async removeSubs(sessionID: string): Promise<void> {
     this.subs.delete(sessionID)
     await this.storage.remove(subsKey(sessionID))
+  }
+
+  // ---- per-session settings -----------------------------------------------
+
+  /** Cache-only read (populated by {@link loadSettings} / {@link setSettings}). */
+  getSettings(sessionID: string): SettingsState | undefined {
+    return this.settings.get(sessionID)
+  }
+
+  async loadSettings(sessionID: string): Promise<SettingsState | undefined> {
+    const parsed = parseSettingsState(await this.storage.get(settingsKey(sessionID)))
+    if (parsed) this.settings.set(sessionID, parsed)
+    return parsed
+  }
+
+  /** Persist an override; `null` clears it so the config default applies again. */
+  async setSettings(sessionID: string, allowMultipleActive: boolean | null): Promise<SettingsState> {
+    const state: SettingsState = { version: 1, sessionID, updatedAt: Date.now() }
+    if (allowMultipleActive !== null) state.allowMultipleActive = allowMultipleActive
+    await this.storage.set(settingsKey(sessionID), state)
+    this.settings.set(sessionID, state)
+    return state
+  }
+
+  async removeSettings(sessionID: string): Promise<void> {
+    this.settings.delete(sessionID)
+    await this.storage.remove(settingsKey(sessionID))
   }
 }
 

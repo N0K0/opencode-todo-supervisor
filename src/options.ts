@@ -15,6 +15,12 @@ export type Options = {
   scope: "project" | "all"
   pauseOnInterrupt: boolean
   debugEvents: boolean
+  /**
+   * Whether more than one item may be `in_progress` at the same time. Default
+   * `false` (the original "exactly one active task" behaviour). A session can
+   * override this at runtime with the `todo_settings` tool.
+   */
+  allowMultipleActive: boolean
 }
 
 export const DEFAULTS: Options = {
@@ -28,6 +34,21 @@ export const DEFAULTS: Options = {
   scope: "project",
   pauseOnInterrupt: true,
   debugEvents: false,
+  allowMultipleActive: false,
+}
+
+/** Per-session settings that shadow the config (set with `todo_settings`). */
+export type SettingsOverride = { allowMultipleActive?: boolean }
+
+/**
+ * Effective `allowMultipleActive`: a session override (persisted by the
+ * `todo_settings` tool) wins over the config default.
+ */
+export function effectiveAllowMultipleActive(
+  options: Pick<Options, "allowMultipleActive">,
+  override?: SettingsOverride | undefined,
+): boolean {
+  return override?.allowMultipleActive ?? options.allowMultipleActive
 }
 
 function readNumber(
@@ -79,6 +100,7 @@ export function parseOptions(raw: unknown): Options {
   readBoolean(input, "injectTodoContext", (v) => (options.injectTodoContext = v))
   readBoolean(input, "pauseOnInterrupt", (v) => (options.pauseOnInterrupt = v))
   readBoolean(input, "debugEvents", (v) => (options.debugEvents = v))
+  readBoolean(input, "allowMultipleActive", (v) => (options.allowMultipleActive = v))
 
   const scope = input["scope"]
   if (scope !== undefined) {

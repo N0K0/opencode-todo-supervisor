@@ -14,6 +14,7 @@ describe("parseOptions", () => {
       settleMs: -5,
       enabled: "yes",
       scope: "nope",
+      allowMultipleActive: 1,
       markdownFiles: [1, 2],
       minNudgeIntervalMs: Number.NaN,
     })
@@ -30,13 +31,22 @@ describe("parseOptions", () => {
       stallMinutes: 2,
       scope: "all",
       enabled: false,
+      allowMultipleActive: true,
       markdownFiles: [" TODO.md ", "", "plans/x.md"],
       unknown: true,
     })
     expect(options.stallMinutes).toBe(2)
     expect(options.scope).toBe("all")
     expect(options.enabled).toBe(false)
+    expect(options.allowMultipleActive).toBe(true)
     expect(options.markdownFiles).toEqual(["TODO.md", "plans/x.md"])
     expect((options as Record<string, unknown>)["unknown"]).toBeUndefined()
+  })
+
+  test("allowMultipleActive defaults to off and rejects non-booleans", () => {
+    expect(DEFAULTS.allowMultipleActive).toBe(false)
+    expect(parseOptions({ allowMultipleActive: true }).allowMultipleActive).toBe(true)
+    expect(parseOptions({ allowMultipleActive: false }).allowMultipleActive).toBe(false)
+    expect(parseOptions({ allowMultipleActive: "yes" }).allowMultipleActive).toBe(false)
   })
 })

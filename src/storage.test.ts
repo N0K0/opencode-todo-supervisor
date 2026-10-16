@@ -6,6 +6,7 @@ import {
   maxId,
   nextId,
   openItems,
+  parseSettingsState,
   TodoStore,
   type StorageLike,
   type TodoItem,
@@ -74,6 +75,35 @@ describe("TodoStore", () => {
     await store.removeTodos("ses_1")
     expect(storage.map.has("todos/ses_1")).toBe(false)
     expect(store.getTodos("ses_1")).toBeUndefined()
+  })
+
+  test("per-session settings round-trip and clear", async () => {
+    const storage = new FakeStorage()
+    const store = new TodoStore(storage)
+    expect(store.getSettings("s1")).toBeUndefined()
+    expect(await store.loadSettings("s1")).toBeUndefined()
+
+    const on = await store.setSettings("s1", true)
+    expect(on.allowMultipleActive).toBe(true)
+    expect(store.getSettings("s1")?.allowMultipleActive).toBe(true)
+
+    // A fresh store (new process) reads the persisted override back.
+    const reopened = new TodoStore(storage)
+    expect(reopened.getSettings("s1")).toBeUndefined()
+    expect((await reopened.loadSettings("s1"))?.allowMultipleActive).toBe(true)
+
+    const cleared = await store.setSettings("s1", null)
+    expect(cleared.allowMultipleActive).toBeUndefined()
+    expect(parseSettingsState(cleared)?.allowMultipleActive).toBeUndefined()
+    expect(parseSettingsState({ version: 1, sessionID: "s1", allowMultipleActive: "yes" })).toEqual({
+      version: 1,
+      sessionID: "s1",
+      updatedAt: 0,
+    })
+    expect(parseSettingsState({ version: 2 })).toBeUndefined()
+
+    await store.removeSettings("s1")
+    expect(store.getSettings("s1")).toBeUndefined()
   })
 
   test("garbage in storage is tolerated", async () => {

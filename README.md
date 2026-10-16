@@ -4,8 +4,8 @@ An [OpenCode](https://opencode.ai) **V2** plugin that gives every session a real
 todo list — and then keeps the agent working on it. A live progress strip in the
 composer (`📋 ███░░░░░ 8/17 open`) tracks the list.
 
-- `todo_write` / `todo_read` / `todo_add` / `todo_remove` tools (V2 ships none),
-  stored per session, with stable per-item ids;
+- `todo_write` / `todo_read` / `todo_add` / `todo_remove` / `todo_settings` tools
+  (V2 ships none), stored per session, with stable per-item ids;
 - a **supervisor** that re-prompts an idle session while its list still has open
   items — and stays quiet while the agent is actually working (thinking,
   preparing a tool, a running tool or `task` subagent, background shells, child
@@ -23,7 +23,7 @@ Tested against OpenCode `2.0.24`.
 ## Install
 
 ```sh
-opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.10
+opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.11
 ```
 
 This also loads the bundled TUI entry. To pass options, use the object form:
@@ -41,6 +41,7 @@ This also loads the bundled TUI entry. To pass options, use the object form:
         "minNudgeIntervalMs": 45000,
         "maxNoProgressNudges": 5,
         "injectTodoContext": true,
+        "allowMultipleActive": false,
         "markdownFiles": ["PLAN.md", "TODO.md"],
         "scope": "project"
       }
@@ -78,7 +79,7 @@ and makes finishing it the path of least resistance:
 
 ## Tools
 
-Six tools, all registered with `codemode: true` so Code Mode agents can call
+Seven tools, all registered with `codemode: true` so Code Mode agents can call
 them too. Together they are the whole interface the model uses.
 
 Every item has a **stable id** (a number, e.g. `3`), assigned when the item is
@@ -108,8 +109,10 @@ Replaces the session's list.
 - The list **replaces** the previous one — always send the complete list. Echo
   each item's `id` to keep it; items without an id are matched to the previous
   list by content, and anything new gets a fresh id.
-- At most one item may be `in_progress`; extra ones are demoted to `pending` and
-  the result says so.
+- One item may be `in_progress`; extra ones are demoted to `pending` and the
+  result says so. When the session allows multiple active items (see
+  [`todo_settings`](#todo_settings) and the [`allowMultipleActive`
+  option](#options)), every `in_progress` item is kept instead.
 - Content is trimmed, empty entries dropped, duplicates removed.
 - Returns the summary plus the canonical list (with ids), and resets the
   supervisor's no-progress counter and any pause.
@@ -123,7 +126,9 @@ Replaces the session's list.
 Appends one item without resending the whole list, and returns its new id.
 `content` is required; `priority` and `status` are optional (`pending` by
 default). Adding content that is already on the list returns the existing id
-instead of creating a duplicate.
+instead of creating a duplicate. Adding an `in_progress` item demotes the
+previous active one(s) — unless several actives are allowed (see
+`todo_settings`), in which case they are left alone.
 
 ### `todo_remove`
 
@@ -136,8 +141,29 @@ Removes one item by its id.
 ### `todo_read`
 
 Input is `{}`. Returns the current list merged with subscribed markdown files
-(`path:line` references), or `No todos.` when empty. The list is also injected
-into context on every request, so this is only to double-check exact state.
+(`path:line` references), or `No todos.` when empty. It also reports the active
+mode (`multiple in_progress items: allowed / not allowed`). The list is also
+injected into context on every request, so this is only to double-check exact
+state.
+
+### `todo_settings`
+
+```json
+{ "allowMultipleActive": "boolean | null" }
+```
+
+Reads or changes this session's todo settings — the per-session override for the
+[`allowMultipleActive` option](#options).
+
+- No arguments: just reports the current settings (and where they come from:
+  `config default` or `session override`).
+- `true` / `false`: overrides the setting for this session only, persisted in
+  storage, so it survives a restart.
+- `null`: clears the override, falling back to the config default.
+
+With it on, `todo_write` keeps every `in_progress` item, `todo_add` does not
+demote the previous active item, and the injected context block tells the model
+that several items may be active at once.
 
 ### `todo_subscribe`
 
@@ -265,6 +291,7 @@ The body/response are wrapped in `{ "input": … }` / `{ "output": … }`.
 | `markdownFiles` | `[]` | Markdown checklists auto-subscribed for sessions in the project |
 | `scope` | `"project"` | Only supervise sessions of the plugin's own project (`"project"` or `"all"`) |
 | `pauseOnInterrupt` | `true` | Pause supervision after an interrupted execution until the user continues |
+| `allowMultipleActive` | `false` | Let more than one item be `in_progress` at once (overridable per session with `todo_settings`) |
 | `debugEvents` | `false` | Log the raw event stream |
 
 ## How it works
@@ -388,7 +415,7 @@ There is no filesystem watcher. Instead:
   (source edits and config content changes; `touch` alone does not).
 - `opencode2 reload` forces reconciliation; `opencode2 service restart` only as a
   last resort (it interrupts sessions).
-- Tests: `bun test` (123 tests across parser, storage, tools, RPC, state machine,
+- Tests: `bun test` (130 tests across parser, storage, tools, RPC, state machine,
   panel helpers).
 - Watch logs: `tail -f ~/.local/share/opencode/log/todo-supervisor.log`.
 

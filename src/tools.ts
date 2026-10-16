@@ -2,7 +2,7 @@
 import { isAbsolute, resolve as resolvePath } from "node:path"
 import type { Plugin } from "@opencode/plugin"
 import { effectiveFiles, MarkdownCache, renderFileSection, resolveMarkdownPath } from "./markdown"
-import type { Options } from "./options"
+import { effectiveAllowMultipleActive, type Options } from "./options"
 import { nextId, openItems, type TodoItem, type TodoPriority, type TodoStore, type TodoStatus } from "./storage"
 
 export interface ToolHooks {
@@ -22,10 +22,14 @@ const MARKERS: Record<TodoStatus, string> = {
 }
 
 /**
- * Trim content, drop empty entries, dedupe by content, keep at most one
- * `in_progress` (extra ones are demoted to `pending`, noted in the output).
+ * Trim content, drop empty entries, dedupe by content, and keep at most one
+ * `in_progress` — unless `allowMultipleActive` is set, in which case every
+ * `in_progress` item is kept (extra demotions are noted in the output).
  */
-export function normalizeItems(raw: readonly TodoItem[]): { items: TodoItem[]; notes: string[] } {
+export function normalizeItems(
+  raw: readonly TodoItem[],
+  allowMultipleActive = false,
+): { items: TodoItem[]; notes: string[] } {
   const notes: string[] = []
   const items: TodoItem[] = []
   const seen = new Set<string>()
@@ -53,7 +57,7 @@ export function normalizeItems(raw: readonly TodoItem[]): { items: TodoItem[]; n
   }
 
   const inProgress = items.filter((item) => item.status === "in_progress")
-  if (inProgress.length > 1) {
+  if (inProgress.length > 1 && !allowMultipleActive) {
     let kept = false
     for (const item of items) {
       if (item.status !== "in_progress") continue
@@ -61,6 +65,8 @@ export function normalizeItems(raw: readonly TodoItem[]): { items: TodoItem[]; n
       kept = true
     }
     notes.push(`demoted ${inProgress.length - 1} extra in_progress item(s) to pending`)
+  } else if (inProgress.length > 1) {
+    notes.push(`kept ${inProgress.length} in_progress items (multiple active allowed)`)
   }
 
   return { items, notes }
@@ -108,7 +114,8 @@ const TODO_ITEM_SCHEMA = {
 
 const WRITE_DESCRIPTION =
   "Replace the session's todo list. Use this to plan multi-step work and keep progress visible: " +
-  "send the complete list every time (it replaces the previous one). Keep exactly one item `in_progress`. " +
+  "send the complete list every time (it replaces the previous one). Keep one item `in_progress`; several only when the " +
+  "session allows it (see `todo_settings`), otherwise extra ones are demoted to `pending`. " +
   "Before ending your turn every item must be `completed` or `canceled` — a supervisor will continue the session while items remain open. " +
   "Each item has a stable `id`; include it to keep the same item across rewrites (otherwise it is matched by content)."
 
@@ -139,6 +146,22 @@ const UNSUBSCRIBE_DESCRIPTION =
   "Stop treating a subscribed markdown file's checklist as todos for this session (this also shadows a config default). " +
   "Paths are relative to the project directory (or absolute) and must end in .md/.markdown."
 
+const SETTINGS_DESCRIPTION =
+  "Read or change this session's todo settings. `allowMultipleActive` decides whether more than one item may be " +
+  "`in_progress` at the same time; the config default applies until you override it for the session. " +
+  "Call with no arguments to read the current settings, or pass `null` to clear the session override."
+
+const SETTINGS_INPUT = {
+  type: "object",
+  properties: {
+    allowMultipleActive: {
+      type: ["boolean", "null"],
+      description: "true/false to override for this session, null to clear the override (config default applies).",
+    },
+  },
+  additionalProperties: false,
+} as const
+
 const SUBSCRIBE_INPUT = {
   type: "object",
   properties: { files: { type: "array", items: SUBSCRIBE_ITEM_SCHEMA } },
@@ -150,9 +173,22 @@ async function readSubs(store: TodoStore, sessionID: string) {
   return (await store.loadSubs(sessionID)) ?? { files: [] as string[], removed: [] as string[] }
 }
 
+/** The part of {@link Options} that decides whether several items may be active. */
+type ActivePolicy = Pick<Options, "allowMultipleActive">
+
+/**
+ * Effective `allowMultipleActive` for a session: the tool-set override if one
+ * was stored, otherwise the config default. Loads on a cache miss so an override
+ * survives a restart.
+ */
+async function activePolicy(store: TodoStore, sessionID: string, options: ActivePolicy): Promise<boolean> {
+  const override = store.getSettings(sessionID) ?? (await store.loadSettings(sessionID))
+  return effectiveAllowMultipleActive(options, override)
+}
+
 type ToolContextLike = { sessionID: string }
 
-export function makeTodoWrite(store: TodoStore, hooks: ToolHooks) {
+export function makeTodoWrite(store: TodoStore, hooks: ToolHooks, options: ActivePolicy = { allowMultipleActive: false }) {
   return {
     name: "todo_write",
     description: WRITE_DESCRIPTION,
@@ -167,7 +203,8 @@ export function makeTodoWrite(store: TodoStore, hooks: ToolHooks) {
     options: { codemode: true as const },
     async execute(input: { todos: TodoItem[] }, context: ToolContextLike) {
       try {
-        const { items, notes } = normalizeItems(Array.isArray(input?.todos) ? input.todos : [])
+        const allowMultiple = await activePolicy(store, context.sessionID, options)
+        const { items, notes } = normalizeItems(Array.isArray(input?.todos) ? input.todos : [], allowMultiple)
         const state = await store.setTodos(context.sessionID, items)
         hooks.onTodosChanged?.(context.sessionID)
         const saved = state.items
@@ -211,13 +248,25 @@ export function makeTodoRead(store: TodoStore, hooks: ToolHooks = {}, deps?: Mar
         )
         const total = items.length + files.reduce((sum, file) => sum + file.items.length, 0)
         const open = openItems(items).length + openMarkdown
-        const header = total === 0 ? "No todos." : `${open} open of ${total} items.`
+        if (total === 0) {
+          return {
+            content: [{ type: "text" as const, text: "No todos." }],
+            metadata: { items: 0, files: files.length },
+          }
+        }
+        let override = store.getSettings(context.sessionID)
+        if (deps && !override) override = await store.loadSettings(context.sessionID)
+        const allowMultiple = deps ? effectiveAllowMultipleActive(deps.options, override) : false
+        const source = override?.allowMultipleActive === undefined ? "config default" : "session override"
+        const header = `${open} open of ${total} items.`
+        const settings =
+          `Settings — multiple in_progress items: ${allowMultiple ? "allowed" : "not allowed"} (${source}).`
         const sections: string[] = []
         if (items.length > 0) sections.push(renderList(items))
         for (const file of files) sections.push(renderFileSection(file, deps!.directory))
         return {
-          content: [{ type: "text" as const, text: [header, ...sections].join("\n\n") }],
-          metadata: { items: items.length, files: files.length },
+          content: [{ type: "text" as const, text: [header, settings, ...sections].join("\n\n") }],
+          metadata: { items: items.length, files: files.length, allowMultipleActive: allowMultiple },
         }
       } catch (err) {
         hooks.log?.(`todo_read failed (${context.sessionID}): ${String(err)}`)
@@ -240,7 +289,7 @@ function validStatus(value: unknown): TodoStatus | undefined {
     : undefined
 }
 
-export function makeTodoAdd(store: TodoStore, hooks: ToolHooks) {
+export function makeTodoAdd(store: TodoStore, hooks: ToolHooks, options: ActivePolicy = { allowMultipleActive: false }) {
   return {
     name: "todo_add",
     description: ADD_DESCRIPTION,
@@ -276,7 +325,21 @@ export function makeTodoAdd(store: TodoStore, hooks: ToolHooks) {
         const item: TodoItem = { id: nextId(existing), content, status: validStatus(input?.status) ?? "pending" }
         const priority = validPriority(input?.priority)
         if (priority) item.priority = priority
-        const saved = await store.setTodos(context.sessionID, [...existing, item])
+        // The "one active task" rule applies to single adds too: unless several
+        // actives are allowed, adding an `in_progress` item demotes the previous
+        // one(s) instead of leaving the list with two.
+        const notes: string[] = []
+        let items = [...existing, item]
+        if (item.status === "in_progress" && !(await activePolicy(store, context.sessionID, options))) {
+          const previous = items.filter((entry) => entry !== item && entry.status === "in_progress")
+          if (previous.length > 0) {
+            items = items.map((entry) =>
+              entry !== item && entry.status === "in_progress" ? { ...entry, status: "pending" as const } : entry,
+            )
+            notes.push(`demoted ${previous.length} previous in_progress item(s) to pending`)
+          }
+        }
+        const saved = await store.setTodos(context.sessionID, items)
         hooks.onTodosChanged?.(context.sessionID)
         const added = saved.items[saved.items.length - 1]!
         return {
@@ -285,7 +348,7 @@ export function makeTodoAdd(store: TodoStore, hooks: ToolHooks) {
               type: "text" as const,
               text:
                 `Added #${added.id} ${added.content}${added.priority ? ` (${added.priority})` : ""}.\n\n` +
-                `${renderSummary(saved.items)}\n\n${renderList(saved.items)}`,
+                `${renderSummary(saved.items, notes)}\n\n${renderList(saved.items)}`,
             },
           ],
           metadata: { items: saved.items.length, open: openItems(saved.items).length, id: added.id },
@@ -338,6 +401,54 @@ export function makeTodoRemove(store: TodoStore, hooks: ToolHooks) {
         hooks.log?.(`todo_remove failed (${context.sessionID}): ${String(err)}`)
         return {
           content: [{ type: "text" as const, text: `todo_remove failed: ${String(err)}` }],
+          metadata: { error: String(err) },
+        }
+      }
+    },
+  }
+}
+
+export function makeTodoSettings(store: TodoStore, hooks: ToolHooks, options: ActivePolicy) {
+  return {
+    name: "todo_settings",
+    description: SETTINGS_DESCRIPTION,
+    input: SETTINGS_INPUT,
+    options: { codemode: true as const },
+    async execute(input: { allowMultipleActive?: boolean | null }, context: ToolContextLike) {
+      try {
+        const provided = Object.prototype.hasOwnProperty.call(input ?? {}, "allowMultipleActive")
+        const requested = (input ?? {}).allowMultipleActive
+        let override = store.getSettings(context.sessionID)
+        if (provided) {
+          if (requested !== null && typeof requested !== "boolean") {
+            throw new Error('"allowMultipleActive" must be true, false or null')
+          }
+          override = await store.setSettings(context.sessionID, requested)
+          hooks.onTodosChanged?.(context.sessionID)
+        } else if (!override) {
+          override = await store.loadSettings(context.sessionID)
+        }
+
+        const effective = effectiveAllowMultipleActive(options, override)
+        const source = override?.allowMultipleActive === undefined ? "config default" : "session override"
+        const verb = provided ? "Updated" : "Current"
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `${verb}: multiple in_progress items are ${effective ? "allowed" : "not allowed"} (${source}).` +
+                (effective
+                  ? " You may keep several items `in_progress` at once."
+                  : " Keep exactly one item `in_progress`; extra ones are demoted to `pending`."),
+            },
+          ],
+          metadata: { allowMultipleActive: effective, override: override?.allowMultipleActive ?? null },
+        }
+      } catch (err) {
+        hooks.log?.(`todo_settings failed (${context.sessionID}): ${String(err)}`)
+        return {
+          content: [{ type: "text" as const, text: `todo_settings failed: ${String(err)}` }],
           metadata: { error: String(err) },
         }
       }
@@ -429,10 +540,11 @@ export async function registerTools(
   markdownDeps: MarkdownDeps,
 ): Promise<{ dispose: () => Promise<void> }> {
   const registration = await ctx.tool.transform((editor) => {
-    editor.add(makeTodoWrite(store, hooks))
+    editor.add(makeTodoWrite(store, hooks, options))
     editor.add(makeTodoRead(store, hooks, { ...markdownDeps, options }))
-    editor.add(makeTodoAdd(store, hooks))
+    editor.add(makeTodoAdd(store, hooks, options))
     editor.add(makeTodoRemove(store, hooks))
+    editor.add(makeTodoSettings(store, hooks, options))
     editor.add(makeTodoSubscribe(store, hooks, markdownDeps.directory))
     editor.add(makeTodoUnsubscribe(store, hooks, markdownDeps.directory))
   })
@@ -498,15 +610,16 @@ export async function registerExecuteAfterHook(
 const CONTEXT_MARKER = "[todo-supervisor] Active todo list"
 
 /** Compact block appended to every model request while the session has a list. */
-export function renderTodoContext(items: readonly TodoItem[]): string {
+export function renderTodoContext(items: readonly TodoItem[], allowMultipleActive = false): string {
   const open = openItems(items)
   const inProgress = items.filter((item) => item.status === "in_progress").length
   const status =
     `${open.length} of ${items.length} todo${items.length === 1 ? "" : "s"} left` +
     (inProgress > 0 ? `, ${inProgress} in progress` : "")
+  const multiple = allowMultipleActive ? " Several items may be `in_progress` at once." : ""
   return (
     `${CONTEXT_MARKER} — ${status}. Keep it updated with todo_write; ` +
-    `only end the turn once every item is completed or canceled.\n${renderList(items)}`
+    `only end the turn once every item is completed or canceled.${multiple}\n${renderList(items)}`
   )
 }
 
@@ -527,7 +640,10 @@ export function makeContextInjector(
       if (items.length === 0) return
       const system = event.system as Array<{ type?: unknown; text?: unknown }>
       if (system.some((part) => typeof part?.text === "string" && part.text.startsWith(CONTEXT_MARKER))) return
-      system.push({ type: "text", text: renderTodoContext(items) })
+      // Cache-only (this hook is synchronous): a session override set earlier in
+      // the session is already cached by todo_settings / todo_write.
+      const allowMultiple = effectiveAllowMultipleActive(options, store.getSettings(event.sessionID))
+      system.push({ type: "text", text: renderTodoContext(items, allowMultiple) })
       if (options.debugEvents) log(`context injected (${event.sessionID}, ${items.length} items)`)
     } catch (err) {
       log(`context injection failed (${String(err)})`)
