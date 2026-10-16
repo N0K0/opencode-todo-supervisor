@@ -306,15 +306,19 @@ export function popoverBodyHeight(viewportHeight: number, extraRows = 0): number
 
 export type DialogSizeName = "medium" | "large" | "xlarge"
 
-const DIALOG_FACTOR: Record<DialogSizeName, number> = { medium: 0.7, large: 0.9, xlarge: 0.98 }
-
 /**
- * Content width for the popover dialog, as a fraction of the terminal width so
- * it scales with the window (`medium` 70%, `large` 90%, `xlarge` 98%), clamped
- * for small terminals and capped so it never spans an ultrawide screen.
+ * The host draws a dialog inside a card of a *fixed* width per size preset
+ * (`medium` 60, `large` 88, `xlarge` 116 cells), capped at the render width
+ * minus two columns; the card height hugs its content.
+ *
+ * Content must be laid out to exactly that width. Text passed a wider budget
+ * wraps (`wrapMode` defaults to `"word"`), which grows the content-hugging card
+ * past the bottom of the screen. So we mirror the host preset rather than a
+ * share of the terminal.
  */
+const DIALOG_WIDTH: Record<DialogSizeName, number> = { medium: 60, large: 88, xlarge: 116 }
+
+/** Content width for the popover dialog: the host card width for `size`. */
 export function dialogWidth(size: DialogSizeName, viewportWidth: number): number {
-  const total = Math.max(40, viewportWidth)
-  const target = Math.round(total * DIALOG_FACTOR[size])
-  return Math.max(36, Math.min(target, total - 4, 200))
+  return Math.min(DIALOG_WIDTH[size], Math.max(20, viewportWidth - 2))
 }

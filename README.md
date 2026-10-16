@@ -23,7 +23,7 @@ Tested against OpenCode `2.0.24`.
 ## Install
 
 ```sh
-opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.6
+opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.7
 ```
 
 This also loads the bundled TUI entry. To pass options, use the object form:
@@ -174,12 +174,14 @@ effective set is `config.markdownFiles ∪ stored files − removed` per session
 
 - **Composer strip** (`session.composer.top`): `📋 ███░░░░░ 8/17 open` (plus `⏸`
   while paused), hidden when there is neither a list nor a subscription.
-- **Popover** (`/todos`, palette "Todo: open todos"): a centered overlay dialog.
-  Its body and width scale with the terminal (up to 48 rows / a share of the
-  window), so the key legend stays visible on a short terminal and a tall one
+- **Popover** (`/todos`, palette "Todo: open todos"): a centered overlay dialog,
+  opened at the widest preset. The body scales with the terminal height (up to
+  48 rows) so the key legend stays visible on a short terminal and a tall one
   shows more rows; the header shows `open/total` and the selected `row n/m`. `f`
-  cycles the dialog size — medium (70%), large (90%), xlarge (98% of the
-  terminal width, capped at 200 cells) — and `esc` closes it.
+  cycles the host dialog width — medium (60), large (88), xlarge (116 cells) —
+  and `esc` closes it. Rows are laid out to the card width exactly (and render
+  with wrapping off), so content never wraps and the card cannot grow past the
+  bottom of the screen.
   - header: progress bar, `open/total`, and a supervision chip (`idle · quiet
     12s · nudges 2`, `working: 1 tool · 1 shell · quiet 4s`, `paused
     (no-progress)`, `not supervised`);

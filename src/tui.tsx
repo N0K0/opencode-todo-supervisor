@@ -539,7 +539,7 @@ export default Plugin.define({
           const background = () => (isCurrent() ? selectedBg() : undefined)
           if (row.kind === "section") {
             return (
-              <text fg={muted()}>
+              <text fg={muted()} wrapMode="none">
                 {prefix() + truncate(row.label + (row.detail ? "  ·  " + row.detail : ""), width() - 6)}
               </text>
             )
@@ -549,7 +549,7 @@ export default Plugin.define({
             const detail = `${row.open} open of ${row.total}`
             return (
               <box backgroundColor={background()}>
-                <text fg={isCurrent() ? accent() : base()}>
+                <text fg={isCurrent() ? accent() : base()} wrapMode="none">
                   {prefix() + (row.collapsed ? "▸ " : "▾ ") + truncate(`${label}  ·  ${detail}`, width() - 6)}
                 </text>
               </box>
@@ -562,7 +562,7 @@ export default Plugin.define({
           parts.push(truncate(row.content + (row.line !== undefined ? `  :${row.line}` : ""), contentWidth()))
           return (
             <box backgroundColor={background()}>
-              <text fg={row.status === "completed" ? muted() : isCurrent() ? accent() : base()}>
+              <text fg={row.status === "completed" ? muted() : isCurrent() ? accent() : base()} wrapMode="none">
                 {parts.join("  ")}
               </text>
             </box>
@@ -571,14 +571,23 @@ export default Plugin.define({
 
         return (
           <box flexDirection="column">
-            <text fg={base()}>
-              {"Todos  " + progressBar(totals().total - totals().open, totals().total, barWidth()) + "  "}
-              {`${totals().open}/${totals().total} open` +
-                (position() ? `  ·  row ${position()!.index}/${position()!.total}` : "")}
+            <text fg={base()} wrapMode="none">
+              {truncate(
+                "Todos  " +
+                  progressBar(totals().total - totals().open, totals().total, barWidth()) +
+                  "  " +
+                  `${totals().open}/${totals().total} open` +
+                  (position() ? `  ·  row ${position()!.index}/${position()!.total}` : ""),
+                width() - 2,
+              )}
             </text>
-            <text fg={muted()}>{"supervision: " + supervisorChip(snap().supervisor)}</text>
+            <text fg={muted()} wrapMode="none">
+              {truncate("supervision: " + supervisorChip(snap().supervisor), width() - 2)}
+            </text>
             <Show when={(filter() ?? "") !== ""}>
-              <text fg={muted()}>{`filter: "${filter()}"  (press / to change)`}</text>
+              <text fg={muted()} wrapMode="none">
+                {truncate(`filter: "${filter()}"  (press / to change)`, width() - 2)}
+              </text>
             </Show>
             <scrollbox
               ref={(node: unknown) => (scrollNode = node as typeof scrollNode)}
@@ -593,7 +602,9 @@ export default Plugin.define({
                 )}
               </For>
             </scrollbox>
-            <text fg={muted()}>{truncate(footerHints(width()).join("  ·  "), Math.max(10, width() - 2))}</text>
+            <text fg={muted()} wrapMode="none">
+              {truncate(footerHints(width()).join("  ·  "), Math.max(10, width() - 2))}
+            </text>
           </box>
         )
       }
@@ -601,7 +612,7 @@ export default Plugin.define({
       // ---- popover (an overlay dialog, like the host's own panes) -----------
 
       function TodoPopover(props: { sessionID: string }) {
-        const [size, setSize] = createSignal<DialogSize>("large")
+        const [size, setSize] = createSignal<DialogSize>("xlarge")
         const cycleSize = () => {
           const next = SIZE_ORDER[(SIZE_ORDER.indexOf(size()) + 1) % SIZE_ORDER.length]!
           setSize(next)
@@ -625,7 +636,7 @@ export default Plugin.define({
 
       const openPopover = (sessionID: string): boolean => {
         try {
-          context.ui.dialog.set({ size: "large", centered: true })
+          context.ui.dialog.set({ size: "xlarge", centered: true })
           context.ui.dialog.show(
             () => <TodoPopover sessionID={sessionID} />,
             () => logFile("tui", "popover closed"),
