@@ -23,7 +23,7 @@ Tested against OpenCode `2.0.24`.
 ## Install
 
 ```sh
-opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.8
+opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.9
 ```
 
 This also loads the bundled TUI entry. To pass options, use the object form:
@@ -198,9 +198,10 @@ effective set is `config.markdownFiles ∪ stored files − removed` per session
     without waiting for an event.
 - **Side panel** (palette "Todo: open side panel"): the same list docked to
   `session.panel` (`todo.todos`), with `f` for fullscreen. Its keys are live only
-  while the panel is focused *and* no overlay is up (dialog, menu, completion
-  list), so a docked panel never steals the arrow keys from the model picker,
-  command palette or the prompt's completions.
+  while the panel is focused *and* no overlay is up (dialog, menu, completions,
+  composer), so a docked panel never steals the arrow keys from the model picker,
+  command palette or the prompt's completions. The gate is applied per key at
+  dispatch, not on the layer: the host ignores a layer-level `enabled`.
 - `/todos add <path>` and `/todos remove <path>` manage subscriptions from the
   prompt.
 - **Toasts** on `nudged` (idle vs stalled wording) and on the all-done transition.
@@ -383,7 +384,7 @@ There is no filesystem watcher. Instead:
   (source edits and config content changes; `touch` alone does not).
 - `opencode2 reload` forces reconciliation; `opencode2 service restart` only as a
   last resort (it interrupts sessions).
-- Tests: `bun test` (121 tests across parser, storage, tools, RPC, state machine,
+- Tests: `bun test` (123 tests across parser, storage, tools, RPC, state machine,
   panel helpers).
 - Watch logs: `tail -f ~/.local/share/opencode/log/todo-supervisor.log`.
 

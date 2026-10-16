@@ -206,20 +206,20 @@ describe("panel cursor", () => {
     // Normal session view: live while focused.
     expect(panelKeys(true, "base")).toBe(true)
     expect(panelKeys(false, "base")).toBe(false)
-    // The model picker, confirmations and other dialogs run in `modal`.
-    expect(panelKeys(true, "modal")).toBe(false)
-    expect(panelKeys(true, "menu")).toBe(false)
-    expect(panelKeys(true, "autocomplete")).toBe(false)
-    // An unknown mode is not treated as an overlay.
-    expect(panelKeys(true, "composer")).toBe(true)
+    // The model picker, dialogs, menus and completions all take the keyboard.
+    for (const mode of ["modal", "menu", "autocomplete", "composer"]) {
+      expect(panelKeys(true, mode)).toBe(false)
+    }
+    // Any other mode (including the plain session view) keeps the panel live.
+    expect(panelKeys(true, "base")).toBe(true)
   })
 
   test("the popover keeps the keyboard in its own dialog", () => {
     expect(popoverKeys("modal")).toBe(true)
     expect(popoverKeys("base")).toBe(true)
-    expect(popoverKeys("composer")).toBe(true)
     expect(popoverKeys("menu")).toBe(false)
     expect(popoverKeys("autocomplete")).toBe(false)
+    expect(popoverKeys("composer")).toBe(false)
   })
 
   test("id and priority tags and their column widths", () => {

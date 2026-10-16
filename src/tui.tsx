@@ -411,8 +411,9 @@ export default Plugin.define({
           })
 
         context.keymap.layer(() => ({
+          // "global" keeps the layer mode-agnostic; the actual gating is done
+          // per command below.
           mode: "global",
-          enabled: () => props.active(),
           priority: 10,
           commands: [
             { title: "Todo: select next", bind: "down", run: () => move(1) },
@@ -493,7 +494,12 @@ export default Plugin.define({
                 }),
             },
             { title: "Todo: close", bind: "escape", run: () => props.close() },
-          ],
+            // The host drops a *layer*-level `enabled`; the *command*-level one
+            // is consulted on every dispatch. Gate each key here so it yields —
+            // and falls through — the moment an overlay (model picker, palette,
+            // completion list, composer) owns the keyboard while a todo surface
+            // happens to still be focused.
+          ].map((command) => ({ ...command, enabled: () => props.active() })),
         }))
 
         const totals = () => {
