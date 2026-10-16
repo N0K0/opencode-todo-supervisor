@@ -66,18 +66,54 @@ and makes finishing it the path of least resistance:
 
 ## Tools
 
-| Tool | Input | Purpose |
-| --- | --- | --- |
-| `todo_write` | `{ todos: [{ content, status, priority? }] }` | Replace the session list (`pending` / `in_progress` / `completed` / `canceled`; at most one `in_progress`) |
-| `todo_read` | `{}` | Rendered list, merged with subscribed markdown files (`path:line` refs) |
-| `todo_subscribe` | `{ files: [{ path }] }` | Markdown mode: treat the file's checklist as todos (`.md`/`.markdown`, relative to the project dir or absolute) |
-| `todo_unsubscribe` | `{ files: [{ path }] }` | Stop supervising a file (also shadows a config default) |
+Four tools, all registered with `codemode: true` so Code Mode agents can call
+them too. Together they are the whole interface the model uses.
 
-`todo_write` normalises input: content is trimmed, empties dropped, duplicates
-removed, and only one item can be `in_progress` (extras are demoted to `pending`
-and the output says so). The tool description states the contract to the model
-("keep updating the list; only end your turn once every item is completed or
-canceled"), and the returned text always shows the canonical list.
+### `todo_write`
+
+Replaces the session's list.
+
+```json
+{
+  "todos": [
+    {
+      "content": "string",
+      "status": "pending | in_progress | completed | canceled",
+      "priority": "high | medium | low"
+    }
+  ]
+}
+```
+
+`content` and `status` are required; `priority` is optional.
+
+- The list **replaces** the previous one — always send the complete list.
+- At most one item may be `in_progress`; extra ones are demoted to `pending` and
+  the result says so.
+- Content is trimmed, empty entries dropped, duplicates removed.
+- Returns the summary plus the canonical list, and resets the supervisor's
+  no-progress counter and any pause.
+
+### `todo_read`
+
+Input is `{}`. Returns the current list merged with subscribed markdown files
+(`path:line` references), or `No todos.` when empty. The list is also injected
+into context on every request, so this is only to double-check exact state.
+
+### `todo_subscribe`
+
+```json
+{ "files": [{ "path": "string" }] }
+```
+
+Treats each file's GFM checklist (`- [ ]`) as todos for this session. Paths are
+relative to the project directory (or absolute) and must end in `.md`/`.markdown`.
+Returns the resulting subscription set.
+
+### `todo_unsubscribe`
+
+Same input as `todo_subscribe`. Stops supervising a file, and also shadows a
+`markdownFiles` config default.
 
 ## Markdown mode
 
@@ -120,12 +156,33 @@ effective set is `config.markdownFiles ∪ stored files − removed` per session
   prompt.
 - **Toasts** on `nudged` (idle vs stalled wording) and on the all-done transition.
 
+## Commands
+
+| Where | Command | Effect |
+| --- | --- | --- |
+| Slash | `/todos` | Open the todo popover for the current session |
+| Slash | `/todos add <path>` | Subscribe a markdown file |
+| Slash | `/todos remove <path>` | Unsubscribe a markdown file |
+| Palette | `Todo: open todos` | Same as `/todos` |
+| Palette | `Todo: open side panel` | Dock the list to `session.panel` instead of the popover |
+
 ## RPC
 
-Contract id `todo` (`opencode-todo-supervisor/rpc`): methods `list`, `clear`,
-`nudge`, `setEnabled`, `toggle`, `toggleFile`, `subscribe`, `unsubscribe`; events
-`updated`, `nudged`. The TUI uses `context.client.rpc(TodoRpc)` and
-`rpc.events.on(...)`.
+Contract id `todo` (`opencode-todo-supervisor/rpc`). The TUI uses
+`context.client.rpc(TodoRpc)` and `rpc.events.on(...)`.
+
+| Method | Input | Purpose |
+| --- | --- | --- |
+| `list` | `{ sessionID }` | Items, subscribed files (parsed fresh), and the supervisor snapshot |
+| `clear` | `{ sessionID }` | Drop the stored list (subscriptions stay) |
+| `nudge` | `{ sessionID }` | Send a nudge now (same dedupe/ownership rules as automatic nudges) |
+| `setEnabled` | `{ sessionID, enabled }` | Per-session supervision kill switch |
+| `toggle` | `{ sessionID, index }` | Flip one session item between completed and pending |
+| `toggleFile` | `{ sessionID, path, line }` | Toggle a checklist item inside a subscribed markdown file |
+| `subscribe` | `{ sessionID, path }` | Subscribe a markdown file |
+| `unsubscribe` | `{ sessionID, path }` | Shadow a subscription |
+
+Events: `updated` (`{ sessionID }`) and `nudged` (`{ sessionID, reason }`).
 
 Over HTTP (service credentials required):
 
