@@ -21,12 +21,19 @@ Tested against OpenCode `2.0.24`.
 
 ## Install
 
+```sh
+opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.1
+```
+
+This also loads the bundled TUI entry. To pass options, use the object form:
+
 ```jsonc
 // ~/.config/opencode/opencode.json
 {
+  "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "/absolute/path/to/todo",
+      "package": "@hacky.software/opencode-todo-supervisor",
       "options": {
         "stallMinutes": 5,
         "settleMs": 5000,
@@ -41,12 +48,18 @@ Tested against OpenCode `2.0.24`.
 }
 ```
 
-- The package directory needs its dependencies once: `bun install` (the loader
-  does not install them for local-path entries).
-- Config content changes and plugin source edits are hot-reloaded by the running
-  service.
-- Published as `opencode-todo-supervisor` on npm: `opencode plugin add
-  opencode-todo-supervisor` (this also loads the bundled TUI entry).
+### Development
+
+To run from a checkout instead, point the config at the directory and run
+`bun install` once inside it (the loader does not install dependencies for
+local-path entries). Config content and plugin source edits are hot-reloaded.
+
+```jsonc
+{
+  "plugins": [{ "package": "/absolute/path/to/todo" }]
+}
+```
+
 - Logs: the plugin appends to `~/.local/share/opencode/log/todo-supervisor.log`
   (prefixes `[todo-supervisor]` / `[todo-supervisor/tui]`). `console.log` inside
   plugins is swallowed; use the log file.
