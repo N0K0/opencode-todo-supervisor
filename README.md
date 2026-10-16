@@ -22,7 +22,7 @@ Tested against OpenCode `2.0.24`.
 ## Install
 
 ```sh
-opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.3
+opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.4
 ```
 
 This also loads the bundled TUI entry. To pass options, use the object form:

@@ -1,6 +1,6 @@
 {
   "name": "@hacky.software/opencode-todo-supervisor",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "OpenCode V2 plugin that gives every session a todo list (todo_write/todo_read), supervises idle sessions until the list is done, and can drive checklists in markdown files from a TUI panel.",
   "type": "module",
   "license": "MIT",
@@ -48,16 +48,5 @@
     "@opentui/core": ">=0.5.14",
     "@opentui/solid": ">=0.5.14",
     "solid-js": ">=1.9.0"
-  },
-  "peerDependenciesMeta": {
-    "@opentui/core": {
-      "optional": true
-    },
-    "@opentui/solid": {
-      "optional": true
-    },
-    "solid-js": {
-      "optional": true
-    }
   }
 }
