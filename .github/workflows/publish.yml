@@ -1,0 +1,35 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+      - run: bun test
+
+      # npm 11.5.1+ / node >= 22.14 are required for OIDC trusted publishing.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      # Authenticates via GitHub OIDC — no token. Provenance is omitted for
+      # private repositories (npm limitation), but the publish is trusted.
+      - run: npm publish
