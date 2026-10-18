@@ -3,6 +3,7 @@
 // Everything here is framework-free: layout math, row building, cursor movement
 // and truncation are unit-tested without an OpenTUI renderer. src/tui.tsx only
 // maps these rows to <text>/<box> elements.
+import { normalizeId } from "./storage"
 
 export type PanelItem = { id?: string; content: string; status: string; priority?: string }
 export type PanelFileItem = { content: string; status: string; line?: number }
@@ -72,7 +73,8 @@ export function statusMark(status: string): string {
 
 /** `#3` for a session item (empty when the item has no id / is a file item). */
 export function idTag(id: string | undefined): string {
-  return id ? `#${id}` : ""
+  const normalized = normalizeId(id)
+  return normalized ? `#${normalized}` : ""
 }
 
 /** Short priority word for a fixed-width column: `high` / `med` / `low` / ``. */

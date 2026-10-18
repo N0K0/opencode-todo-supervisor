@@ -75,7 +75,8 @@ export function parseTodoState(value: unknown): TodoState | undefined {
     const status = entry.status
     if (status !== "pending" && status !== "in_progress" && status !== "completed" && status !== "canceled") continue
     const item: TodoItem = { content: entry.content, status }
-    if (typeof entry.id === "string" && entry.id !== "") item.id = entry.id
+    const id = normalizeId(typeof entry.id === "string" ? entry.id : undefined)
+    if (id !== undefined) item.id = id
     if (entry.priority === "high" || entry.priority === "medium" || entry.priority === "low") {
       item.priority = entry.priority
     }
@@ -253,8 +254,31 @@ export function hashList(items: readonly TodoItem[]): string {
 
 // ---- stable ids (§5.3) ------------------------------------------------------
 
+/**
+ * Canonical form of an id: surrounding whitespace trimmed and any leading `#`
+ * decorations removed. Ids are displayed as `#3`, so a model rewriting the list
+ * tends to echo the `#` back; storing it verbatim made ids grow a `#` on every
+ * rewrite (`#1` → `##1` → …). `undefined` means "no id".
+ */
+export function normalizeId(id: string | undefined): string | undefined {
+  if (typeof id !== "string") return undefined
+  const trimmed = id.trim().replace(/^#+/, "").trim()
+  return trimmed === "" ? undefined : trimmed
+}
+
+/** Strip a leading `#` from an optional id (returns the item unchanged when canonical). */
+function withNormalizedId(item: TodoItem): TodoItem {
+  const id = normalizeId(item.id)
+  if (id === item.id) return item
+  if (id === undefined) {
+    const { id: _dropped, ...rest } = item
+    return rest
+  }
+  return { ...item, id }
+}
+
 function numericId(id: string | undefined): number {
-  const value = Number(id)
+  const value = Number(normalizeId(id))
   return Number.isInteger(value) && value > 0 ? value : 0
 }
 
@@ -270,7 +294,8 @@ export function nextId(items: readonly TodoItem[]): string {
 
 /**
  * Give every item a stable id. An id already on the item is kept when it is
- * valid and unique; otherwise the id of a `previous` item with the same content
+ * valid and unique (a leading `#` from the rendered form is stripped first);
+ * otherwise the id of a `previous` item with the same content
  * is reused (so `todo_write`, which resends the whole list, does not renumber
  * everything); otherwise a fresh id above every id seen so far is allocated.
  *
@@ -278,12 +303,13 @@ export function nextId(items: readonly TodoItem[]): string {
  * like a content change to the supervisor.
  */
 export function assignIds(items: readonly TodoItem[], previous: readonly TodoItem[] = []): TodoItem[] {
-  const pool = [...previous]
+  const normalized = items.map(withNormalizedId)
+  const pool = previous.map(withNormalizedId)
   const used = new Set<string>()
-  let counter = Math.max(maxId(previous), maxId(items))
+  let counter = Math.max(maxId(pool), maxId(normalized))
   const out: TodoItem[] = []
 
-  for (const item of items) {
+  for (const item of normalized) {
     let id = typeof item.id === "string" && item.id !== "" && !used.has(item.id) ? item.id : undefined
     if (id === undefined) {
       const index = pool.findIndex(

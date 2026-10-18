@@ -3,7 +3,7 @@ import { isAbsolute, resolve as resolvePath } from "node:path"
 import type { Plugin } from "@opencode/plugin"
 import { effectiveFiles, MarkdownCache, renderFileSection, resolveMarkdownPath } from "./markdown"
 import { effectiveAllowMultipleActive, type Options } from "./options"
-import { nextId, openItems, type TodoItem, type TodoPriority, type TodoStore, type TodoStatus } from "./storage"
+import { nextId, normalizeId, openItems, type TodoItem, type TodoPriority, type TodoStore, type TodoStatus } from "./storage"
 
 export interface ToolHooks {
   /** Fired after a successful `todo_write` (supervisor reset, RPC notify, …). */
@@ -49,7 +49,8 @@ export function normalizeItems(
     }
 
     const item: TodoItem = { content, status }
-    if (typeof entry.id === "string" && entry.id.trim() !== "") item.id = entry.id.trim()
+    const id = normalizeId(entry.id)
+    if (id !== undefined) item.id = id
     if (entry.priority === "high" || entry.priority === "medium" || entry.priority === "low") {
       item.priority = entry.priority
     }
@@ -76,7 +77,8 @@ export function renderList(items: readonly TodoItem[]): string {
   if (items.length === 0) return "No todos."
   return items
     .map((item) => {
-      const tag = item.id ? `#${item.id} ` : ""
+      const id = normalizeId(item.id)
+      const tag = id ? `#${id} ` : ""
       return `- ${tag}${MARKERS[item.status]} ${item.content}${item.priority ? ` (${item.priority})` : ""}`
     })
     .join("\n")
@@ -117,14 +119,16 @@ const WRITE_DESCRIPTION =
   "send the complete list every time (it replaces the previous one). Keep one item `in_progress`; several only when the " +
   "session allows it (see `todo_settings`), otherwise extra ones are demoted to `pending`. " +
   "Before ending your turn every item must be `completed` or `canceled` — a supervisor will continue the session while items remain open. " +
-  "Each item has a stable `id`; include it to keep the same item across rewrites (otherwise it is matched by content)."
+  "Each item has a stable `id`; include it to keep the same item across rewrites (otherwise it is matched by content). " +
+  "Ids are bare tokens such as `3` — the `#` shown in the rendered list is decoration and is stripped if you send it."
 
 const ADD_DESCRIPTION =
   "Add one item to the session's todo list without resending the whole list. Returns the new item's id. " +
   "Prefer this (or todo_write) over rewriting the list to append a single task."
 
 const REMOVE_DESCRIPTION =
-  "Remove one item from the session's todo list by its id (see the ids in todo_read / the injected todo block)."
+  "Remove one item from the session's todo list by its bare id, e.g. `3` (see todo_read / the injected todo block; " +
+  "a leading `#` is accepted but not required)."
 
 const READ_DESCRIPTION =
   "Read the session's current todo list (canonical state as stored by todo_write). " +
@@ -377,8 +381,8 @@ export function makeTodoRemove(store: TodoStore, hooks: ToolHooks) {
     options: { codemode: true as const },
     async execute(input: { id?: string }, context: ToolContextLike) {
       try {
-        const id = String(input?.id ?? "").trim()
-        if (!id) throw new Error('"id" must be a non-empty string')
+        const id = normalizeId(typeof input?.id === "string" ? input.id : undefined)
+        if (id === undefined) throw new Error('"id" must be a non-empty string')
         const state = await store.refreshTodos(context.sessionID)
         const existing = state?.items ?? []
         const removed = existing.find((item) => item.id === id)

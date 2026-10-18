@@ -5,8 +5,10 @@ import {
   isDone,
   maxId,
   nextId,
+  normalizeId,
   openItems,
   parseSettingsState,
+  parseTodoState,
   TodoStore,
   type StorageLike,
   type TodoItem,
@@ -170,6 +172,49 @@ describe("stable ids", () => {
     expect(maxId([])).toBe(0)
     expect(maxId([{ content: "a", status: "pending" }, { id: "4", content: "b", status: "pending" }])).toBe(4)
     expect(nextId([{ id: "4", content: "b", status: "pending" }])).toBe("5")
+    // Decorated ids (legacy corruption) still count.
+    expect(maxId([{ id: "###3", content: "a", status: "pending" }])).toBe(3)
+  })
+
+  test("normalizeId strips decoration and whitespace", () => {
+    expect(normalizeId("#3")).toBe("3")
+    expect(normalizeId("  ##12  ")).toBe("12")
+    expect(normalizeId("t1")).toBe("t1")
+    expect(normalizeId("#")).toBeUndefined()
+    expect(normalizeId("   ")).toBeUndefined()
+    expect(normalizeId(undefined)).toBeUndefined()
+  })
+
+  test("assignIds strips a leading '#' from explicit and previous ids", () => {
+    expect(assignIds([{ id: "#7", content: "z", status: "pending" }])[0]!.id).toBe("7")
+    const previous: TodoItem[] = [{ id: "5", content: "a", status: "pending" }]
+    const rewritten = assignIds([{ id: "##5", content: "a", status: "pending" }], previous)
+    expect(rewritten[0]!.id).toBe("5")
+  })
+
+  test("parseTodoState heals decorated stored ids", () => {
+    const state = parseTodoState({
+      version: 1,
+      sessionID: "s",
+      items: [
+        { id: "#3", content: "a", status: "pending" },
+        { id: "###4", content: "b", status: "pending" },
+      ],
+      updatedAt: 0,
+    })
+    expect(state?.items.map((item) => item.id)).toEqual(["3", "4"])
+
+    // Two rows that collapse to the same id stay unique.
+    const collision = parseTodoState({
+      version: 1,
+      sessionID: "s",
+      items: [
+        { id: "1", content: "a", status: "pending" },
+        { id: "#1", content: "b", status: "pending" },
+      ],
+      updatedAt: 0,
+    })
+    expect(collision?.items.map((item) => item.id)).toEqual(["1", "2"])
   })
 
   test("the store backfills ids for legacy rows", async () => {

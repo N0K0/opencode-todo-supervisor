@@ -164,6 +164,21 @@ describe("RPC contract (§5.6)", () => {
     await expect(w.handlers.toggle!({ sessionID: "s1" })).rejects.toThrow(/index/)
   })
 
+  test("toggle / removeItem / setPriority accept a decorated id", async () => {
+    const w = await setup([
+      { id: "1", content: "one", status: "pending" },
+      { id: "2", content: "two", status: "pending" },
+    ])
+    const toggled = (await w.handlers.toggle!({ sessionID: "s1", id: "#2" })) as Record<string, unknown>
+    expect(toggled).toMatchObject({ id: "2", status: "completed" })
+    await w.handlers.setPriority!({ sessionID: "s1", id: "##1", priority: "high" })
+    expect(w.todos.get("s1")![0]!.priority).toBe("high")
+    await w.handlers.removeItem!({ sessionID: "s1", id: "#1" })
+    expect(w.todos.get("s1")!.map((item) => item.id)).toEqual(["2"])
+    // An id that is only decoration normalizes away and is rejected.
+    await expect(w.handlers.removeItem!({ sessionID: "s1", id: "#" })).rejects.toThrow(/id/)
+  })
+
   test("addItem appends a pending item with a fresh id and emits updated", async () => {
     const w = await setup([{ id: "1", content: "one", status: "pending" }])
     const result = (await w.handlers.addItem!({ sessionID: "s1", content: "  two  ", priority: "high" })) as Record<

@@ -228,6 +228,9 @@ describe("panel cursor", () => {
   test("id and priority tags and their column widths", () => {
     expect(idTag(undefined)).toBe("")
     expect(idTag("12")).toBe("#12")
+    // A decorated id never doubles the '#', even before storage heals it.
+    expect(idTag("#12")).toBe("#12")
+    expect(idTag("###12")).toBe("#12")
     expect(priorityTag(undefined)).toBe("")
     expect(priorityTag("high")).toBe("high")
     expect(priorityTag("medium")).toBe("med")

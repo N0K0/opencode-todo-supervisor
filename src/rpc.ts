@@ -10,7 +10,7 @@ import type { Plugin } from "@opencode/plugin"
 import { Rpc } from "@opencode/plugin/rpc"
 import { effectiveFiles, MarkdownCache, resolveMarkdownPath, toggleMarkdownItem } from "./markdown"
 import type { Options } from "./options"
-import { nextId, type TodoItem, type TodoStore } from "./storage"
+import { nextId, normalizeId, type TodoItem, type TodoStore } from "./storage"
 import type { Supervisor } from "./supervisor"
 
 // Kept for consumers/tests that import the resolver from the RPC module.
@@ -259,7 +259,8 @@ export async function registerTodoRpc(ctx: Plugin.Context, deps: RpcDeps): Promi
       const items = state?.items ?? []
       let index: number
       if (input.id !== undefined) {
-        const id = requireString(input.id, "id")
+        const id = normalizeId(requireString(input.id, "id"))
+        if (id === undefined) throw new Error('invalid input: "id" must be a non-empty string')
         index = items.findIndex((item) => item.id === id)
         if (index === -1) throw new Error(`invalid input: no item with id ${JSON.stringify(id)}`)
       } else {
@@ -297,7 +298,8 @@ export async function registerTodoRpc(ctx: Plugin.Context, deps: RpcDeps): Promi
     removeItem: async (raw) => {
       const input = requireObject(raw)
       const sessionID = requireString(input.sessionID, "sessionID")
-      const id = requireString(input.id, "id")
+      const id = normalizeId(requireString(input.id, "id"))
+      if (id === undefined) throw new Error('invalid input: "id" must be a non-empty string')
       const state = await store.refreshTodos(sessionID)
       const items = state?.items ?? []
       if (!items.some((item) => item.id === id)) {
@@ -315,7 +317,8 @@ export async function registerTodoRpc(ctx: Plugin.Context, deps: RpcDeps): Promi
     setPriority: async (raw) => {
       const input = requireObject(raw)
       const sessionID = requireString(input.sessionID, "sessionID")
-      const id = requireString(input.id, "id")
+      const id = normalizeId(requireString(input.id, "id"))
+      if (id === undefined) throw new Error('invalid input: "id" must be a non-empty string')
       const priority = input.priority
       if (priority !== "high" && priority !== "medium" && priority !== "low" && priority !== "none") {
         throw new Error('invalid input: "priority" must be high, medium, low or none')

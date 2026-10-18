@@ -57,6 +57,15 @@ describe("normalizeItems", () => {
     expect(items.map((i) => i.status)).toEqual(["in_progress", "in_progress", "pending"])
     expect(notes.join(" ")).toContain("kept 2 in_progress items")
   })
+
+  test("strips a leading '#' from ids (the rendered form)", () => {
+    const { items } = normalizeItems([
+      { id: "#3", content: "a", status: "pending" },
+      { id: "  ##4 ", content: "b", status: "pending" },
+      { id: "#", content: "c", status: "pending" },
+    ])
+    expect(items.map((item) => item.id)).toEqual(["3", "4", undefined])
+  })
 })
 
 describe("renderers", () => {
@@ -116,6 +125,20 @@ describe("todo tools round-trip", () => {
     const read = makeTodoRead(new TodoStore(new FakeStorage()))
     const result = await read.execute({}, { sessionID: "ses_none" })
     expect(result.content[0]?.text).toBe("No todos.")
+  })
+
+  test("ids do not grow '#' when the rendered form is echoed back (regression)", async () => {
+    const store = new TodoStore(new FakeStorage())
+    const write = makeTodoWrite(store, {})
+    await write.execute({ todos: [{ content: "task A", status: "pending" }] }, { sessionID: "ses_grow" })
+    // The model reads `- #1 [ ] task A` and copies the `#1` into the id field.
+    for (let turn = 0; turn < 4; turn++) {
+      await write.execute({ todos: [{ id: "#1", content: "task A", status: "pending" }] }, { sessionID: "ses_grow" })
+    }
+    const read = makeTodoRead(store)
+    const text = (await read.execute({}, { sessionID: "ses_grow" })).content[0]?.text ?? ""
+    expect(text).toContain("- #1 [ ] task A")
+    expect(text).not.toContain("##")
   })
 
   test("todo_write storage failure is logged and returned as a tool error", async () => {
@@ -246,6 +269,18 @@ describe("todo_add / todo_remove", () => {
 
     const missing = await remove.execute({ id: "9" }, { sessionID: "s1" })
     expect(missing.content[0]?.text).toContain("todo_remove failed")
+  })
+
+  test("remove accepts a decorated id (leading '#')", async () => {
+    const store = new TodoStore(new FakeStorage())
+    await store.setTodos("s1", [
+      { content: "one", status: "pending" },
+      { content: "two", status: "pending" },
+    ])
+    const remove = makeTodoRemove(store, {})
+    const result = await remove.execute({ id: "##1" }, { sessionID: "s1" })
+    expect(result.content[0]?.text).toContain("Removed #1: one")
+    expect(store.getTodos("s1")?.items.map((item) => item.id)).toEqual(["2"])
   })
 })
 

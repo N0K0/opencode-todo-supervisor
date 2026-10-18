@@ -1,6 +1,6 @@
 {
   "name": "@hacky.software/opencode-todo-supervisor",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "OpenCode V2 plugin that gives every session a todo list (todo_write/todo_read), supervises idle sessions until the list is done, and can drive checklists in markdown files from a TUI panel.",
   "type": "module",
   "license": "MIT",
