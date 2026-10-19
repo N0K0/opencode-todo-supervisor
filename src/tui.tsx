@@ -189,19 +189,24 @@ export default Plugin.define({
         const total = () => items().length + files().reduce((sum, file) => sum + (file.items?.length ?? 0), 0)
         const open = () => countOpen(items()) + files().reduce((sum, file) => sum + countOpen(file.items ?? []), 0)
         const paused = () => snap()?.supervisor?.paused === true
+        const label = () => {
+          if (!snap()) return "📋 …"
+          if (total() === 0) return "📋 no todos"
+          return (
+            "📋 " +
+            progressBar(total() - open(), total(), 8) +
+            " " +
+            open() +
+            "/" +
+            total() +
+            " open" +
+            (paused() ? " · ⏸" : "")
+          )
+        }
         return (
-          <Show when={total() > 0}>
-            <text fg={themeColor(themed.theme, "text.base")}>
-              {"📋 " +
-                progressBar(total() - open(), total(), 8) +
-                " " +
-                open() +
-                "/" +
-                total() +
-                " open" +
-                (paused() ? " · ⏸" : "")}
-            </text>
-          </Show>
+          <text fg={total() > 0 ? themeColor(themed.theme, "text.base") : themeColor(themed.theme, "text.muted")}>
+            {label()}
+          </text>
         )
       }
 
@@ -598,7 +603,7 @@ export default Plugin.define({
 
         return (
           <box flexDirection="column">
-            <text fg={base()} wrapMode="none">
+            <text height={1} fg={base()} wrapMode="none">
               {truncate(
                 "Todos  " +
                   progressBar(totals().total - totals().open, totals().total, barWidth()) +
@@ -608,11 +613,11 @@ export default Plugin.define({
                 width() - 2,
               )}
             </text>
-            <text fg={muted()} wrapMode="none">
+            <text height={1} fg={muted()} wrapMode="none">
               {truncate("supervision: " + supervisorChip(snap().supervisor), width() - 2)}
             </text>
             <Show when={(filter() ?? "") !== ""}>
-              <text fg={muted()} wrapMode="none">
+              <text height={1} fg={muted()} wrapMode="none">
                 {truncate(`filter: "${filter()}"  (press / to change)`, width() - 2)}
               </text>
             </Show>
