@@ -24,7 +24,7 @@ Tested against OpenCode `2.0.24`.
 ## Install
 
 ```sh
-opencode plugin add @hacky.software/opencode-todo-supervisor@0.3.14
+opencode plugin add @hacky.software/opencode-todo-supervisor
 ```
 
 > **OpenCode 2.0.32 packaging note:** TUI entries installed from npm are
