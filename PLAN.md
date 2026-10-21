@@ -398,10 +398,13 @@ when set so the model can order its next actions):
 - `open-todos` (idle nudge — explains why it fired, then status, then the list):
   ```
   [todo-supervisor] Idle nudge #N — the session went idle with <status>.
+
+  Outstanding todo tasks:
   <renderList(openItems)>
 
-  Continue working through the list (start with the [~] item when present). Keep it updated
-  with todo_write, and only end your turn once every item is completed or canceled.
+  Read the outstanding todo tasks above (todo_read returns the canonical list) and continue
+  working on them — start with the [~] item when present. Update status with todo_write as you
+  go, and only end your turn once every item is completed or canceled.
   ```
 - `stalled-task` (`<quiet>` = measured quiet span, e.g. "~7.2 min"; the `from:`
   list names every open kind — subagent, background shell, **tool** (a `task`
@@ -410,9 +413,12 @@ when set so the model can order its next actions):
   ```
   [todo-supervisor] Stall nudge #N — no activity for <quiet> from: subagent <sessionID> / background shell "<cmd>" / tool <name> "<label>" / open step (stall threshold 5 min).
   Status: <status>. Check its status, recover or restart it if stuck, then continue:
+  Outstanding todo tasks:
   <renderList(openItems)>
 
-  Keep the list updated with todo_write; only end your turn once every item is completed or canceled.
+  Read the outstanding todo tasks above (todo_read returns the canonical list) and continue
+  working on them — start with the [~] item when present. Update status with todo_write as you
+  go, and only end your turn once every item is completed or canceled.
   ```
 
 #### Stop conditions

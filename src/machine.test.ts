@@ -176,6 +176,9 @@ describe("idle evaluation & nudging (aspect 7)", () => {
     expect(call.text).toContain("- [ ] one")
     expect(call.text).toContain("- [~] two")
     expect(call.text).not.toContain("three")
+    expect(call.text).toContain("Outstanding todo tasks:")
+    expect(call.text).toContain("Read the outstanding todo tasks above (todo_read returns the canonical list)")
+    expect(call.text).toContain("continue working on them")
   })
 
   test("priority and resume hint are visible in the nudge text", async () => {
@@ -310,6 +313,8 @@ describe("idle evaluation & nudging (aspect 7)", () => {
     expect(text).toContain("1 of 2 todos left")
     expect(text).toContain("- [ ] file task  (TODO.md:3)")
     expect(text).not.toContain("already done")
+    expect(text).toContain("Outstanding checklist items:")
+    expect(text).toContain("Read the outstanding checklist items above and continue working on them")
     expect(text).toContain("edit the subscribed file and mark items")
   })
 
@@ -430,6 +435,8 @@ describe("idle evaluation & nudging (aspect 7)", () => {
     await sleep(900)
     expect(h.calls.length).toBe(1)
     expect(h.calls[0]!.text).toContain('background shell "sleep 600"')
+    expect(h.calls[0]!.text).toContain("Outstanding todo tasks:")
+    expect(h.calls[0]!.text).toContain("Read the outstanding todo tasks above (todo_read returns the canonical list)")
   })
 
   test("nudges stop after the list completes and resume on new items", async () => {

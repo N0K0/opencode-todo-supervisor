@@ -1106,12 +1106,15 @@ export class Supervisor {
 
     const markdownNote =
       sources.fileOpen.length > 0 ? " Markdown items are checked off by editing the file (`- [x]`)." : ""
+    const heading = sources.sessionItems.length > 0 ? "Outstanding todo tasks:" : "Outstanding checklist items:"
     const footer =
       sources.sessionItems.length > 0
-        ? "Continue working through the list (start with the [~] item when present). Keep it updated with " +
-          "todo_write, and only end your turn once every item is completed or canceled." +
+        ? "Read the outstanding todo tasks above (todo_read returns the canonical list) and continue working on them — " +
+          "start with the [~] item when present. Update status with todo_write as you go, and only end your turn once " +
+          "every item is completed or canceled." +
           markdownNote
-        : "Continue with the open checklist items; edit the subscribed file and mark items `- [x]` when done."
+        : "Read the outstanding checklist items above and continue working on them; edit the subscribed file and mark " +
+          "items `- [x]` when done."
 
     if (reason === "stalled-task" && stalled) {
       const who = [
@@ -1123,13 +1126,13 @@ export class Supervisor {
       return (
         `[todo-supervisor] Stall nudge #${nudgeNumber} — no activity for ${formatQuiet(stalled.quietMs, this.deps.options.stallMinutes)} ` +
         `from: ${who.length > 0 ? who.join(" / ") : "open work"} (stall threshold ${this.deps.options.stallMinutes} min).\n` +
-        `Status: ${status}. Check its status, recover or restart it if stuck, then continue:\n${list}\n\n` +
-        `Keep the list updated with todo_write; only end your turn once every item is completed or canceled.` +
-        markdownNote
+        `Status: ${status}. Check its status, recover or restart it if stuck, then continue:\n${heading}\n${list}\n\n` +
+        footer
       )
     }
     return (
-      `[todo-supervisor] Idle nudge #${nudgeNumber} — the session went idle with ${status}.\n${list}\n\n${footer}`
+      `[todo-supervisor] Idle nudge #${nudgeNumber} — the session went idle with ${status}.\n\n` +
+      `${heading}\n${list}\n\n${footer}`
     )
   }
 
